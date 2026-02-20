@@ -24,12 +24,12 @@ depends = ["build"]
 run = './"$BINARY"'
 
 [tasks.test]
-description = "Run unit tests (excludes real-log integration test)"
-run = 'go test -v -run "Test[^R]" ./internal/...'
+description = "Run unit tests (parser/stats/watcher only; UI has no tests)"
+run = 'go test -v -run "Test[^R]" ./internal/parser/... ./internal/stats/... ./internal/watcher/...'
 
 [tasks.test-all]
 description = "Run all tests including real VRChat log integration test"
-run = "go test -v ./internal/..."
+run = "go test -v ./internal/parser/... ./internal/stats/... ./internal/watcher/..."
 
 [tasks.test-parser]
 description = "Run parser tests only"
