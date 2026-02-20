@@ -37,10 +37,11 @@ func (c *Calculator) Calculate(hands []*parser.Hand, localSeat int) *Stats {
 		ps.Hands++
 
 		// Financial
-		ps.Invested += c.investedAmount(h, localSeat)
+		invested := c.investedAmount(h, localSeat)
+		ps.Invested += invested
 		ps.PotWon += localInfo.PotWon
 		s.TotalPotWon += localInfo.PotWon
-		s.TotalInvested += ps.Invested
+		s.TotalInvested += invested
 
 		// Win
 		if localInfo.Won {
@@ -170,17 +171,17 @@ func (c *Calculator) updateHandRange(table *HandRangeTable, pi *parser.PlayerHan
 	}
 
 	cell.Dealt++
-	if pi.VPIP {
-		cell.VPIP++
-	}
-	if pi.PFR {
-		cell.PFR++
-	}
-	if pi.ThreeBet {
-		cell.ThreeBet++
-	}
-	if pi.FoldedPF {
-		cell.Fold++
+	if action, ok := preflopActionSummary(pi); ok {
+		switch action {
+		case parser.ActionFold:
+			cell.Fold++
+		case parser.ActionCall:
+			cell.Call++
+		case parser.ActionBet:
+			cell.Bet++
+		case parser.ActionRaise:
+			cell.Raise++
+		}
 	}
 	if pi.Won {
 		cell.Won++
@@ -193,21 +194,63 @@ func (c *Calculator) updateHandRange(table *HandRangeTable, pi *parser.PlayerHan
 		cell.ByPosition[pos] = ppc
 	}
 	ppc.Dealt++
-	if pi.VPIP {
-		ppc.VPIP++
-	}
-	if pi.PFR {
-		ppc.PFR++
-	}
-	if pi.ThreeBet {
-		ppc.ThreeBet++
-	}
-	if pi.FoldedPF {
-		ppc.Fold++
+	if action, ok := preflopActionSummary(pi); ok {
+		switch action {
+		case parser.ActionFold:
+			ppc.Fold++
+		case parser.ActionCall:
+			ppc.Call++
+		case parser.ActionBet:
+			ppc.Bet++
+		case parser.ActionRaise:
+			ppc.Raise++
+		}
 	}
 	if pi.Won {
 		ppc.Won++
 	}
+}
+
+func preflopActionSummary(pi *parser.PlayerHandInfo) (parser.ActionType, bool) {
+	if pi == nil {
+		return parser.ActionUnknown, false
+	}
+
+	last := parser.ActionUnknown
+	for _, act := range pi.Actions {
+		if act.Street != parser.StreetPreFlop {
+			continue
+		}
+		switch act.Action {
+		case parser.ActionBlindSB, parser.ActionBlindBB:
+			continue
+		case parser.ActionCheck, parser.ActionCall:
+			last = parser.ActionCall
+		case parser.ActionBet:
+			last = parser.ActionBet
+		case parser.ActionRaise:
+			last = parser.ActionRaise
+		case parser.ActionFold:
+			last = parser.ActionFold
+		case parser.ActionAllIn:
+			last = parser.ActionRaise
+		}
+	}
+
+	if last == parser.ActionUnknown {
+		if pi.FoldedPF {
+			return parser.ActionFold, true
+		}
+		if pi.PFR || pi.ThreeBet {
+			return parser.ActionRaise, true
+		}
+		if pi.VPIP {
+			return parser.ActionCall, true
+		}
+		return parser.ActionUnknown, false
+	}
+
+	return last, true
 }
 
 // newHandRangeTable initializes the 13x13 hand range table with empty cells

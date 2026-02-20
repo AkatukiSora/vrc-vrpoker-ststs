@@ -94,10 +94,10 @@ func colorForRate(rate float64) color.Color {
 type actionFilter int
 
 const (
-	filterVPIP actionFilter = iota
-	filterPFR
-	filter3Bet
-	filterFold
+	filterFold actionFilter = iota
+	filterCall
+	filterBet
+	filterRaise
 )
 
 // positionFilter maps select index to parser.Position (0 = All).
@@ -127,14 +127,14 @@ func cellRate(cell *stats.HandRangeCell, af actionFilter, posIdx int) float64 {
 	if posIdx == 0 {
 		// Overall
 		switch af {
-		case filterVPIP:
-			return cell.VPIPRate()
-		case filterPFR:
-			return cell.PFRRate()
-		case filter3Bet:
-			return cell.ThreeBetRate()
 		case filterFold:
 			return cell.FoldRate()
+		case filterCall:
+			return cell.CallRate()
+		case filterBet:
+			return cell.BetRate()
+		case filterRaise:
+			return cell.RaiseRate()
 		}
 		return 0
 	}
@@ -146,14 +146,14 @@ func cellRate(cell *stats.HandRangeCell, af actionFilter, posIdx int) float64 {
 		return -1
 	}
 	switch af {
-	case filterVPIP:
-		return float64(pc.VPIP) / float64(pc.Dealt) * 100
-	case filterPFR:
-		return float64(pc.PFR) / float64(pc.Dealt) * 100
-	case filter3Bet:
-		return float64(pc.ThreeBet) / float64(pc.Dealt) * 100
 	case filterFold:
 		return float64(pc.Fold) / float64(pc.Dealt) * 100
+	case filterCall:
+		return float64(pc.Call) / float64(pc.Dealt) * 100
+	case filterBet:
+		return float64(pc.Bet) / float64(pc.Dealt) * 100
+	case filterRaise:
+		return float64(pc.Raise) / float64(pc.Dealt) * 100
 	}
 	return 0
 }
@@ -271,10 +271,10 @@ func showCellDetail(cell *stats.HandRangeCell, win fyne.Window) {
 	tableItems = append(tableItems, headerCells...)
 
 	tableItems = append(tableItems, addCountRow("Dealt", cell.Dealt, func(pc *stats.HandRangePositionCell) int { return pc.Dealt })...)
-	tableItems = append(tableItems, addRow("VPIP%", cell.VPIP, cell.Dealt, func(pc *stats.HandRangePositionCell) (int, int) { return pc.VPIP, pc.Dealt })...)
-	tableItems = append(tableItems, addRow("PFR%", cell.PFR, cell.Dealt, func(pc *stats.HandRangePositionCell) (int, int) { return pc.PFR, pc.Dealt })...)
-	tableItems = append(tableItems, addRow("3Bet%", cell.ThreeBet, cell.Dealt, func(pc *stats.HandRangePositionCell) (int, int) { return pc.ThreeBet, pc.Dealt })...)
 	tableItems = append(tableItems, addRow("Fold%", cell.Fold, cell.Dealt, func(pc *stats.HandRangePositionCell) (int, int) { return pc.Fold, pc.Dealt })...)
+	tableItems = append(tableItems, addRow("Call%", cell.Call, cell.Dealt, func(pc *stats.HandRangePositionCell) (int, int) { return pc.Call, pc.Dealt })...)
+	tableItems = append(tableItems, addRow("Bet%", cell.Bet, cell.Dealt, func(pc *stats.HandRangePositionCell) (int, int) { return pc.Bet, pc.Dealt })...)
+	tableItems = append(tableItems, addRow("Raise%", cell.Raise, cell.Dealt, func(pc *stats.HandRangePositionCell) (int, int) { return pc.Raise, pc.Dealt })...)
 	tableItems = append(tableItems, addCountRow("Won", cell.Won, func(pc *stats.HandRangePositionCell) int { return pc.Won })...)
 
 	tableGrid := container.NewGridWithColumns(cols, tableItems...)
@@ -422,6 +422,7 @@ func makeHandCell(
 		b := widget.NewButton("", func() {
 			showCellDetail(capturedCell, win)
 		})
+		b.Importance = widget.LowImportance
 		btn = b
 	} else {
 		btn = canvas.NewRectangle(color.Transparent)
@@ -443,7 +444,7 @@ func NewHandRangeTab(s *stats.Stats, win fyne.Window) fyne.CanvasObject {
 	}
 
 	// ── State ────────────────────────────────────────────────────────────────
-	currentAction := filterVPIP
+	currentAction := filterCall
 	currentPosIdx := 0 // 0 = All
 
 	// ── Grid container (mutable) ──────────────────────────────────────────────
@@ -459,21 +460,21 @@ func NewHandRangeTab(s *stats.Stats, win fyne.Window) fyne.CanvasObject {
 	rebuildGrid()
 
 	// ── Filter: action ────────────────────────────────────────────────────────
-	actionOptions := []string{"VPIP", "PFR", "3Bet%", "Fold%"}
+	actionOptions := []string{"Fold", "Call", "Bet", "Raise"}
 	actionSelect := widget.NewSelect(actionOptions, func(val string) {
 		switch val {
-		case "VPIP":
-			currentAction = filterVPIP
-		case "PFR":
-			currentAction = filterPFR
-		case "3Bet%":
-			currentAction = filter3Bet
-		case "Fold%":
+		case "Fold":
 			currentAction = filterFold
+		case "Call":
+			currentAction = filterCall
+		case "Bet":
+			currentAction = filterBet
+		case "Raise":
+			currentAction = filterRaise
 		}
 		rebuildGrid()
 	})
-	actionSelect.SetSelected("VPIP")
+	actionSelect.SetSelected("Call")
 
 	// ── Filter: position ──────────────────────────────────────────────────────
 	posOptions := make([]string, len(positionFilters))

@@ -9,23 +9,19 @@ import (
 	"time"
 )
 
-// Log line patterns
 var (
-	// Timestamp prefix: "2026.02.21 00:18:29 Debug      -  "
 	reTimestamp = regexp.MustCompile(`^(\d{4}\.\d{2}\.\d{2} \d{2}:\d{2}:\d{2}) \w+\s+-\s+(.+)$`)
 
-	// World events
 	reWorldJoining = regexp.MustCompile(`Joining (wrld_[a-f0-9-]+)`)
 	reWorldLeaving = regexp.MustCompile(`\[Behaviour\] OnLeftRoom`)
 
-	// Table events
 	reNewGame        = regexp.MustCompile(`\[Table\]: Preparing for New Game`)
 	reNewCommunity   = regexp.MustCompile(`\[Table\]: New Community Card: (.+)`)
 	reFoldToOne      = regexp.MustCompile(`\[Table\]: Fold to One Condition`)
 	reNextPhase      = regexp.MustCompile(`\[Table\]: Next phase\.True - (\d+)`)
 	reCollectingBets = regexp.MustCompile(`\[Table\]: Collecting Bets`)
+	reNewMinBet      = regexp.MustCompile(`\[Table\]: New Min Bet: (\d+)`)
 
-	// Seat events
 	reDrawLocalHole = regexp.MustCompile(`\[Seat\]: Draw Local Hole Cards: (.+)`)
 	reSBBet         = regexp.MustCompile(`\[Seat\]: Player (\d+) SB BET IN = (\d+)`)
 	reBBBet         = regexp.MustCompile(`\[Seat\]: Player (\d+) BB BET IN = (\d+)`)
@@ -33,7 +29,6 @@ var (
 	rePlayerEndTurn = regexp.MustCompile(`\[Seat\]: Player (\d+) End Turn with BET IN = (\d+)`)
 	reShowHoleCards = regexp.MustCompile(`\[Seat\]: Player (\d+) Show hole cards: (.+)`)
 
-	// Pot events
 	rePotWinner  = regexp.MustCompile(`\[Pot\]: Winner: (\d+) Pot Amount: (\d+)`)
 	rePotManager = regexp.MustCompile(`\[PotManager\]: All players folded, player (\d+) won (\d+)`)
 )
@@ -42,20 +37,24 @@ const timeLayout = "2006.01.02 15:04:05"
 
 // Parser holds state for incremental log parsing
 type Parser struct {
-	result          ParseResult
-	currentHand     *Hand
-	handIDCounter   int
-	inPokerWorld    bool
-	currentStreet   Street
-	streetBetAmount int // highest bet in current street (for raise/call detection)
+	result        ParseResult
+	currentHand   *Hand
+	handIDCounter int
+	inPokerWorld  bool
+	currentStreet Street
+
+	// Per-street tracking
+	streetBetAmount int       // current highest bet in the street
+	streetBets      map[int]int // total committed by each player this street
 	foldedThisHand  map[int]bool
-	pendingWinners  []pendingWin
-	lastTimestamp   time.Time
-	streetBets      map[int]int // per-player committed amount in current street
-	pfActions       []pfAction  // pre-flop action sequence for 3bet detection
-	// pending local hole cards (arrive after Draw Local Hole Cards before we know seat)
+
+	pendingWinners    []pendingWin
+	lastTimestamp     time.Time
 	pendingLocalCards []Card
-	lastBlindSeat     int // most recent SB or BB seat logged (for local seat hinting)
+	lastBlindSeat     int
+
+	// Pre-flop action sequence for 3bet/fold-to-3bet detection
+	pfActions []pfAction
 }
 
 type pendingWin struct {
@@ -69,24 +68,20 @@ type pfAction struct {
 	amount int
 }
 
-// NewParser creates a new log parser
 func NewParser() *Parser {
 	return &Parser{
-		result: ParseResult{
-			LocalPlayerSeat: -1,
-		},
+		result:         ParseResult{LocalPlayerSeat: -1},
 		foldedThisHand: make(map[int]bool),
 		streetBets:     make(map[int]int),
+		lastBlindSeat:  -1,
 	}
 }
 
-// ParseLine processes a single log line and updates state
 func (p *Parser) ParseLine(line string) error {
 	m := reTimestamp.FindStringSubmatch(line)
 	if m == nil {
 		return nil
 	}
-
 	ts, err := time.Parse(timeLayout, m[1])
 	if err != nil {
 		return nil
@@ -94,16 +89,14 @@ func (p *Parser) ParseLine(line string) error {
 	p.lastTimestamp = ts
 	msg := strings.TrimSpace(m[2])
 
-	// --- World detection ---
+	// World detection
 	if wm := reWorldJoining.FindStringSubmatch(msg); wm != nil {
-		worldID := wm[1]
-		p.inPokerWorld = (worldID == VRPokerWorldID)
+		p.inPokerWorld = (wm[1] == VRPokerWorldID)
 		p.result.InPokerWorld = p.inPokerWorld
 		return nil
 	}
 	if reWorldLeaving.MatchString(msg) {
 		if p.inPokerWorld {
-			// Finalize any ongoing hand when leaving
 			p.finalizeCurrentHand()
 		}
 		p.inPokerWorld = false
@@ -111,49 +104,37 @@ func (p *Parser) ParseLine(line string) error {
 		return nil
 	}
 
-	// Only track poker events in VRPoker world.
-	// But for historical full-log parsing, we detect poker events regardless
-	// and filter by VRPokerWorldID presence in the log overall.
 	return p.processPokerEvent(ts, msg)
 }
 
 func (p *Parser) processPokerEvent(ts time.Time, msg string) error {
-	// === New game start ===
+	// === New game ===
 	if reNewGame.MatchString(msg) {
 		p.finalizeCurrentHand()
 		p.startNewHand(ts)
 		return nil
 	}
-
 	if p.currentHand == nil {
 		return nil
 	}
 
 	// === Draw local hole cards ===
-	// These arrive right after "Preparing for New Game" (sometimes after SB/BB lines).
-	// Strategy to identify local seat:
-	// 1. Already known from previous hand → use it
-	// 2. SB posted before this line → SB seat might be us
-	// 3. Store as pending, resolve at "Show hole cards" matching
 	if m := reDrawLocalHole.FindStringSubmatch(msg); m != nil {
 		cards, err := parseCards(m[1])
-		if err != nil {
+		if err != nil || len(cards) != 2 {
 			return nil
 		}
 		p.pendingLocalCards = cards
 
 		localSeat := p.result.LocalPlayerSeat
 		if localSeat >= 0 {
-			// Already identified in a previous hand
 			p.assignLocalCards(localSeat, cards)
 		} else if p.lastBlindSeat >= 0 {
-			// The most recently logged blind (SB or BB) is likely the local player.
-			// "Draw Local Hole Cards" arrives immediately after the local player's blind post,
-			// so the last-logged blind seat is us.
-			// This will be corrected later if "Show hole cards" reveals a different match.
+			// Tentative: last blind poster is likely us
+			// Will be corrected by Show hole cards if wrong
 			p.assignLocalCards(p.lastBlindSeat, cards)
 		}
-		// If neither known, wait for Show hole cards to confirm
+		// If no blind seen yet, will be resolved at Show hole cards
 		return nil
 	}
 
@@ -162,6 +143,7 @@ func (p *Parser) processPokerEvent(ts time.Time, msg string) error {
 		seat, _ := strconv.Atoi(m[1])
 		amount, _ := strconv.Atoi(m[2])
 		p.currentHand.SBSeat = seat
+		p.lastBlindSeat = seat
 		p.ensurePlayer(seat)
 		pi := p.currentHand.Players[seat]
 		pi.Actions = append(pi.Actions, PlayerAction{
@@ -169,11 +151,10 @@ func (p *Parser) processPokerEvent(ts time.Time, msg string) error {
 			Street: StreetPreFlop, Action: ActionBlindSB, Amount: amount,
 		})
 		p.streetBets[seat] = amount
-		if p.streetBetAmount < amount {
+		if amount > p.streetBetAmount {
 			p.streetBetAmount = amount
 		}
 		p.pfActions = append(p.pfActions, pfAction{seat, ActionBlindSB, amount})
-		p.lastBlindSeat = seat
 		return nil
 	}
 
@@ -182,6 +163,7 @@ func (p *Parser) processPokerEvent(ts time.Time, msg string) error {
 		seat, _ := strconv.Atoi(m[1])
 		amount, _ := strconv.Atoi(m[2])
 		p.currentHand.BBSeat = seat
+		p.lastBlindSeat = seat
 		p.ensurePlayer(seat)
 		pi := p.currentHand.Players[seat]
 		pi.Actions = append(pi.Actions, PlayerAction{
@@ -189,11 +171,20 @@ func (p *Parser) processPokerEvent(ts time.Time, msg string) error {
 			Street: StreetPreFlop, Action: ActionBlindBB, Amount: amount,
 		})
 		p.streetBets[seat] = amount
-		if p.streetBetAmount < amount {
+		if amount > p.streetBetAmount {
 			p.streetBetAmount = amount
 		}
 		p.pfActions = append(p.pfActions, pfAction{seat, ActionBlindBB, amount})
-		p.lastBlindSeat = seat
+		return nil
+	}
+
+	// === New Min Bet (raise announced) ===
+	// This reliably tells us the current bet level in the street
+	if m := reNewMinBet.FindStringSubmatch(msg); m != nil {
+		amount, _ := strconv.Atoi(m[1])
+		if amount > p.streetBetAmount {
+			p.streetBetAmount = amount
+		}
 		return nil
 	}
 
@@ -217,7 +208,7 @@ func (p *Parser) processPokerEvent(ts time.Time, msg string) error {
 		return nil
 	}
 
-	// === Next phase / Collecting bets: street boundary ===
+	// === Street boundary: Next phase / Collecting bets ===
 	if reNextPhase.MatchString(msg) || reCollectingBets.MatchString(msg) {
 		p.streetBets = make(map[int]int)
 		p.streetBetAmount = 0
@@ -241,13 +232,13 @@ func (p *Parser) processPokerEvent(ts time.Time, msg string) error {
 		return nil
 	}
 
-	// === Player end turn (bet/call/check/raise) ===
+	// === Player End Turn ===
 	if m := rePlayerEndTurn.FindStringSubmatch(msg); m != nil {
 		seat, _ := strconv.Atoi(m[1])
 		amount, _ := strconv.Atoi(m[2])
 
+		// Skip redundant End Turn after Fold
 		if p.foldedThisHand[seat] {
-			// Ignore "End Turn" that comes after Folded (redundant log line)
 			return nil
 		}
 
@@ -260,10 +251,10 @@ func (p *Parser) processPokerEvent(ts time.Time, msg string) error {
 			Street: p.currentStreet, Action: action, Amount: amount,
 		})
 
+		p.streetBets[seat] = amount
 		if amount > p.streetBetAmount {
 			p.streetBetAmount = amount
 		}
-		p.streetBets[seat] = amount
 
 		if p.currentStreet == StreetPreFlop {
 			p.pfActions = append(p.pfActions, pfAction{seat, action, amount})
@@ -271,11 +262,11 @@ func (p *Parser) processPokerEvent(ts time.Time, msg string) error {
 		return nil
 	}
 
-	// === Show hole cards (showdown) ===
+	// === Show hole cards ===
 	if m := reShowHoleCards.FindStringSubmatch(msg); m != nil {
 		seat, _ := strconv.Atoi(m[1])
 		cards, err := parseCards(m[2])
-		if err != nil {
+		if err != nil || len(cards) != 2 {
 			return nil
 		}
 		p.ensurePlayer(seat)
@@ -283,9 +274,8 @@ func (p *Parser) processPokerEvent(ts time.Time, msg string) error {
 		pi.ShowedDown = true
 		p.currentStreet = StreetShowdown
 
-		// If this matches pending local cards → this player is us
+		// If the shown cards match our pending local cards → confirm seat
 		if p.pendingLocalCards != nil && cardsMatch(p.pendingLocalCards, cards) {
-			// Local seat confirmed
 			if p.result.LocalPlayerSeat < 0 {
 				p.result.LocalPlayerSeat = seat
 			}
@@ -302,7 +292,7 @@ func (p *Parser) processPokerEvent(ts time.Time, msg string) error {
 		return nil
 	}
 
-	// === Pot winner (showdown split pot or multi-winner) ===
+	// === Pot winner (showdown) ===
 	if m := rePotWinner.FindStringSubmatch(msg); m != nil {
 		seat, _ := strconv.Atoi(m[1])
 		amount, _ := strconv.Atoi(m[2])
@@ -313,7 +303,7 @@ func (p *Parser) processPokerEvent(ts time.Time, msg string) error {
 		return nil
 	}
 
-	// === PotManager (all folded, one winner) ===
+	// === PotManager (fold win) ===
 	if m := rePotManager.FindStringSubmatch(msg); m != nil {
 		seat, _ := strconv.Atoi(m[1])
 		amount, _ := strconv.Atoi(m[2])
@@ -325,8 +315,10 @@ func (p *Parser) processPokerEvent(ts time.Time, msg string) error {
 	return nil
 }
 
-// assignLocalCards sets hole cards for the local player's seat
 func (p *Parser) assignLocalCards(seat int, cards []Card) {
+	if p.currentHand == nil {
+		return
+	}
 	p.ensurePlayer(seat)
 	pi := p.currentHand.Players[seat]
 	if pi != nil {
@@ -337,7 +329,6 @@ func (p *Parser) assignLocalCards(seat int, cards []Card) {
 	p.pendingLocalCards = nil
 }
 
-// cardsMatch returns true if two card slices have the same cards (order-insensitive)
 func cardsMatch(a, b []Card) bool {
 	if len(a) != len(b) {
 		return false
@@ -350,62 +341,49 @@ func cardsMatch(a, b []Card) bool {
 	return true
 }
 
-// classifyAction determines the action type based on bet amount vs current street state
 func (p *Parser) classifyAction(seat, amount int) ActionType {
 	prevCommitted := p.streetBets[seat]
-
 	if amount == 0 {
-		// Zero bet: check (no one bet before) or call of 0 (edge case)
-		if p.streetBetAmount == 0 || prevCommitted == p.streetBetAmount {
-			return ActionCheck
-		}
 		return ActionCheck
 	}
-
-	// Compare to current street max bet
 	if p.streetBetAmount == 0 {
-		// First bet in street
-		return ActionBet
+		return ActionBet // first aggressor
 	}
 	if amount > p.streetBetAmount {
 		return ActionRaise
 	}
-	if amount == p.streetBetAmount {
+	if amount == p.streetBetAmount && amount > prevCommitted {
 		return ActionCall
 	}
-	// Partial call (all-in for less)
-	return ActionCall
+	// amount <= streetBetAmount but player already committed some:
+	// Could be completing a blind or partial call
+	if amount > prevCommitted {
+		return ActionCall
+	}
+	return ActionCheck
 }
 
-// ensurePlayer creates player entry if not exists
 func (p *Parser) ensurePlayer(seat int) {
 	if p.currentHand == nil {
 		return
 	}
 	if _, ok := p.currentHand.Players[seat]; !ok {
 		p.currentHand.Players[seat] = &PlayerHandInfo{SeatID: seat}
-		// Only add to ActiveSeats once
-		found := false
 		for _, s := range p.currentHand.ActiveSeats {
 			if s == seat {
-				found = true
-				break
+				return
 			}
 		}
-		if !found {
-			p.currentHand.ActiveSeats = append(p.currentHand.ActiveSeats, seat)
-		}
+		p.currentHand.ActiveSeats = append(p.currentHand.ActiveSeats, seat)
 	}
 }
 
-// startNewHand initializes a new hand
 func (p *Parser) startNewHand(ts time.Time) {
 	p.handIDCounter++
-	localSeat := p.result.LocalPlayerSeat
 	p.currentHand = &Hand{
 		ID:              p.handIDCounter,
 		StartTime:       ts,
-		LocalPlayerSeat: localSeat,
+		LocalPlayerSeat: p.result.LocalPlayerSeat,
 		Players:         make(map[int]*PlayerHandInfo),
 		SBSeat:          -1,
 		BBSeat:          -1,
@@ -421,20 +399,18 @@ func (p *Parser) startNewHand(ts time.Time) {
 	p.lastBlindSeat = -1
 }
 
-// finalizeCurrentHand completes the current hand and adds to results
 func (p *Parser) finalizeCurrentHand() {
 	if p.currentHand == nil {
 		return
 	}
-
 	h := p.currentHand
 
-	// If local cards are still pending (no showdown match), assign to known local seat
+	// Resolve pending local cards
 	if p.pendingLocalCards != nil && p.result.LocalPlayerSeat >= 0 {
 		p.assignLocalCards(p.result.LocalPlayerSeat, p.pendingLocalCards)
 	}
 
-	// Apply pending winners
+	// Apply winners
 	totalPot := 0
 	for _, pw := range p.pendingWinners {
 		p.ensurePlayer(pw.seatID)
@@ -453,20 +429,16 @@ func (p *Parser) finalizeCurrentHand() {
 		}
 	}
 
-	// Count players
 	h.NumPlayers = len(h.ActiveSeats)
-
-	// Assign positions (requires SB/BB to be known)
+	if h.SBSeat < 0 || h.BBSeat < 0 {
+		p.inferBlindsFromPreflop(h)
+	}
 	p.assignPositions(h)
-
-	// Calculate pre-flop stats for all players
 	p.calculatePreflopStats(h)
 
 	h.EndTime = p.lastTimestamp
-	// Mark as complete only if we have winners or community cards
 	h.IsComplete = len(p.pendingWinners) > 0 || len(h.CommunityCards) > 0
 
-	// Only keep hands where local player participated
 	localSeat := h.LocalPlayerSeat
 	if localSeat >= 0 {
 		if _, ok := h.Players[localSeat]; ok {
@@ -478,18 +450,123 @@ func (p *Parser) finalizeCurrentHand() {
 	p.pendingLocalCards = nil
 }
 
-// assignPositions assigns poker positions based on SB/BB
-func (p *Parser) assignPositions(h *Hand) {
-	if h.SBSeat < 0 || h.BBSeat < 0 {
-		// Try to infer from actions
+// calculatePreflopStats computes VPIP/PFR/3Bet/FoldTo3Bet for all players.
+//
+// VRPoker log structure without SB/BB lines:
+//   First End Turn with amount > 0 is treated as the "open" (like BB).
+//   Subsequent raises are 2bet, 3bet, etc.
+//
+// With SB/BB lines:
+//   BlindSB/BlindBB = level 1 (not voluntary)
+//   First raise/bet = 2bet (PFR)
+//   Second raise = 3bet
+func (p *Parser) calculatePreflopStats(h *Hand) {
+	if len(p.pfActions) == 0 {
 		return
 	}
 
+	hasBlinds := h.SBSeat >= 0 || h.BBSeat >= 0
+
+	// betLevel tracks aggression:
+	// hasBlinds:   0=preblind, 1=after SB, 2=after BB (=open), 3=3bet, ...
+	// !hasBlinds:  0=before first bet, 1=first bet (open), 2=2bet/3bet, ...
+	betLevel := 0
+	if hasBlinds {
+		betLevel = 1 // SB counts as level 1 even if not logged
+	}
+
+	// Track who raised at each level for FoldTo3Bet
+	raiserAtLevel := make(map[int]int) // level -> seatID of raiser
+
+	for _, act := range p.pfActions {
+		pi, ok := h.Players[act.seatID]
+		if !ok {
+			continue
+		}
+
+		isSB := act.seatID == h.SBSeat
+		isBB := act.seatID == h.BBSeat
+
+		switch act.action {
+		case ActionBlindSB:
+			betLevel = 1
+
+		case ActionBlindBB:
+			if betLevel < 2 {
+				betLevel = 2
+			}
+
+		case ActionRaise, ActionBet:
+			betLevel++
+			raiserAtLevel[betLevel] = act.seatID
+			switch betLevel {
+			case 2: // open raise / first aggression
+				pi.PFR = true
+				pi.VPIP = true
+			case 3: // 3-bet
+				pi.ThreeBet = true
+				pi.VPIP = true
+			default: // 4bet+
+				pi.VPIP = true
+			}
+
+		case ActionCall:
+			// SB completing to BB is not VPIP
+			// BB checking / calling raise is VPIP
+			if isSB && act.amount <= p.bbAmount(h) {
+				// SB completing the BB without a raise = not voluntary beyond blind
+				// But calling a raise from SB = VPIP
+				if betLevel > 2 {
+					pi.VPIP = true
+				}
+				// SB posting and completing = still VPIP? No: SB is forced.
+				// Only raises beyond BB are voluntary for SB
+			} else if isBB && betLevel <= 2 {
+				// BB calling their own blind or checking = not additional VPIP
+				// BB calling a raise = VPIP
+			} else {
+				pi.VPIP = true
+			}
+
+		case ActionCheck:
+			// BB checks when no raise = not VPIP
+
+		case ActionFold:
+			// FoldTo3Bet: player folds when facing a 3-bet
+			// = they had raised (level 2 raiser) and someone 3-bet (level 3)
+			if betLevel >= 3 {
+				if raiserSeat, ok := raiserAtLevel[betLevel-1]; ok && raiserSeat == act.seatID {
+					pi.FoldTo3Bet = true
+				}
+			}
+		}
+		_ = isSB
+		_ = isBB
+	}
+}
+
+// bbAmount estimates the BB amount from the hand's blind structure
+func (p *Parser) bbAmount(h *Hand) int {
+	if h.BBSeat >= 0 {
+		if pi, ok := h.Players[h.BBSeat]; ok {
+			for _, act := range pi.Actions {
+				if act.Action == ActionBlindBB {
+					return act.Amount
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func (p *Parser) assignPositions(h *Hand) {
+	if h.SBSeat < 0 || h.BBSeat < 0 {
+		return
+	}
 	allSeats := make([]int, len(h.ActiveSeats))
 	copy(allSeats, h.ActiveSeats)
 	sortInts(allSeats)
 
-	// Find SB in sorted list
 	sbIdx := -1
 	for i, s := range allSeats {
 		if s == h.SBSeat {
@@ -501,25 +578,63 @@ func (p *Parser) assignPositions(h *Hand) {
 		return
 	}
 
-	// Rotate so SB is first
 	rotated := append(allSeats[sbIdx:], allSeats[:sbIdx]...)
-	n := len(rotated)
-	positions := positionOrder(n)
-
+	positions := positionOrder(len(rotated))
 	for i, seat := range rotated {
-		if pi, ok := h.Players[seat]; ok {
-			if i < len(positions) {
-				pi.Position = positions[i]
-			}
+		if pi, ok := h.Players[seat]; ok && i < len(positions) {
+			pi.Position = positions[i]
 		}
 	}
 }
 
-// positionOrder returns position assignments for n players starting from SB
+func (p *Parser) inferBlindsFromPreflop(h *Hand) bool {
+	if h == nil || h.SBSeat >= 0 || h.BBSeat >= 0 {
+		return false
+	}
+
+	firstSeat := -1
+	for _, act := range p.pfActions {
+		switch act.action {
+		case ActionBlindSB, ActionBlindBB:
+			continue
+		case ActionFold, ActionCheck, ActionCall, ActionBet, ActionRaise, ActionAllIn:
+			firstSeat = act.seatID
+		}
+		if firstSeat >= 0 {
+			break
+		}
+	}
+	if firstSeat < 0 {
+		return false
+	}
+
+	seats := make([]int, len(h.ActiveSeats))
+	copy(seats, h.ActiveSeats)
+	sortInts(seats)
+
+	idx := -1
+	for i, s := range seats {
+		if s == firstSeat {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || len(seats) < 2 {
+		return false
+	}
+
+	bbIdx := (idx - 1 + len(seats)) % len(seats)
+	sbIdx := (idx - 2 + len(seats)) % len(seats)
+
+	h.BBSeat = seats[bbIdx]
+	h.SBSeat = seats[sbIdx]
+	return true
+}
+
 func positionOrder(n int) []Position {
 	switch n {
 	case 2:
-		return []Position{PosSB, PosBTN} // HU: SB = BTN acts first PF
+		return []Position{PosSB, PosBTN}
 	case 3:
 		return []Position{PosSB, PosBB, PosBTN}
 	case 4:
@@ -534,9 +649,7 @@ func positionOrder(n int) []Position {
 		return []Position{PosSB, PosBB, PosUTG, PosUTG1, PosMP, PosMP1, PosCO, PosBTN}
 	default:
 		result := make([]Position, n)
-		if n > 0 {
-			result[0] = PosSB
-		}
+		result[0] = PosSB
 		if n > 1 {
 			result[1] = PosBB
 		}
@@ -553,88 +666,18 @@ func positionOrder(n int) []Position {
 	}
 }
 
-// calculatePreflopStats computes VPIP/PFR/3bet for all players
-func (p *Parser) calculatePreflopStats(h *Hand) {
-	if len(p.pfActions) == 0 {
-		return
-	}
-
-	// Track bet levels:
-	// 1 = blind level (SB/BB)
-	// 2 = first open raise (PFR)
-	// 3 = 3-bet
-	// 4 = 4-bet, etc.
-	betLevel := 1 // blinds count as level 1
-	firstRaiserSeat := -1
-
-	for _, act := range p.pfActions {
-		pi, ok := h.Players[act.seatID]
-		if !ok {
-			continue
-		}
-		isBB := act.seatID == h.BBSeat
-		isSB := act.seatID == h.SBSeat
-
-		switch act.action {
-		case ActionBlindSB, ActionBlindBB:
-			// blinds = level 1, no voluntary action
-
-		case ActionBet, ActionRaise, ActionAllIn:
-			betLevel++
-			switch betLevel {
-			case 2: // open raise
-				firstRaiserSeat = act.seatID
-				pi.PFR = true
-				pi.VPIP = true
-			case 3: // 3-bet
-				pi.ThreeBet = true
-				pi.VPIP = true
-			default:
-				pi.VPIP = true
-			}
-
-		case ActionCall:
-			// Calling is VPIP unless it's BB calling a limp (amount == BB)
-			if isSB || !isBB {
-				pi.VPIP = true
-			} else if isBB && act.amount > 0 {
-				// BB calling a raise = VPIP
-				pi.VPIP = true
-			}
-
-		case ActionCheck:
-			// BB checking is NOT VPIP
-
-		case ActionFold:
-			// Fold to 3-bet: if the first raiser folds after a 3-bet
-			if betLevel >= 3 && act.seatID == firstRaiserSeat {
-				pi.FoldTo3Bet = true
-			}
-		}
-		_ = isSB
-	}
-}
-
-// ParseReader parses all lines from a reader (first pass: full file)
 func ParseReader(r io.Reader) (*ParseResult, error) {
 	pr := NewParser()
-
-	// Pre-scan to detect if VRPoker world is visited
-	// For simplicity: just parse all poker events regardless of world
-	// (the watcher filters by world; ParseReader is for historical analysis)
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-
 	for scanner.Scan() {
 		_ = pr.ParseLine(scanner.Text())
 	}
-
 	pr.finalizeCurrentHand()
 	result := pr.result
 	return &result, scanner.Err()
 }
 
-// parseCards parses a comma-separated card string like "7d, 9c"
 func parseCards(s string) ([]Card, error) {
 	parts := strings.Split(s, ",")
 	cards := make([]Card, 0, len(parts))
@@ -648,7 +691,6 @@ func parseCards(s string) ([]Card, error) {
 	return cards, nil
 }
 
-// parseCard parses a single card like "7d", "10h", "Ah"
 func parseCard(s string) (Card, error) {
 	s = strings.TrimSpace(s)
 	if len(s) < 2 {
@@ -663,7 +705,6 @@ func parseCard(s string) (Card, error) {
 		"7": true, "8": true, "9": true, "10": true,
 		"J": true, "Q": true, "K": true, "A": true,
 	}
-
 	if !validSuits[suit] || !validRanks[rank] {
 		return Card{}, nil
 	}
@@ -678,19 +719,10 @@ func sortInts(s []int) {
 	}
 }
 
-// GetLocalSeat returns the detected local player's seat number
-func (p *Parser) GetLocalSeat() int {
-	return p.result.LocalPlayerSeat
-}
-
-// GetHands returns all completed hands
+func (p *Parser) GetLocalSeat() int      { return p.result.LocalPlayerSeat }
 func (p *Parser) GetHands() []*Hand {
-	hands := make([]*Hand, len(p.result.Hands))
-	copy(hands, p.result.Hands)
-	return hands
+	h := make([]*Hand, len(p.result.Hands))
+	copy(h, p.result.Hands)
+	return h
 }
-
-// GetCurrentHand returns the hand currently in progress (may be nil)
-func (p *Parser) GetCurrentHand() *Hand {
-	return p.currentHand
-}
+func (p *Parser) GetCurrentHand() *Hand { return p.currentHand }

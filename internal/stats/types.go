@@ -61,13 +61,13 @@ type HandRangeCell struct {
 	Suited  bool   // true if suited, false if offsuit (only applies when Rank1 != Rank2)
 	IsPair  bool
 
-	// Action counts
-	Dealt    int // times dealt this hand
-	VPIP     int // times voluntarily entered pot
-	PFR      int // times raised PF
-	ThreeBet int // times 3-bet
-	Fold     int // times folded PF
-	Won      int // times won
+	// Action counts (pre-flop summary)
+	Dealt int // times dealt this hand
+	Fold  int // folded pre-flop
+	Call  int // called or checked pre-flop
+	Bet   int // bet pre-flop (no prior bet logged)
+	Raise int // raised pre-flop
+	Won   int // times won
 
 	// Position breakdown for this combo
 	ByPosition map[parser.Position]*HandRangePositionCell
@@ -75,12 +75,12 @@ type HandRangeCell struct {
 
 // HandRangePositionCell holds per-position stats for a hand combo
 type HandRangePositionCell struct {
-	Dealt    int
-	VPIP     int
-	PFR      int
-	ThreeBet int
-	Fold     int
-	Won      int
+	Dealt int
+	Fold  int
+	Call  int
+	Bet   int
+	Raise int
+	Won   int
 }
 
 // RankOrder is the canonical rank order for the 13x13 grid (A=0, 2=12)
@@ -105,20 +105,6 @@ func (c *HandRangeCell) ComboKey() string {
 }
 
 // Rates returns computed percentage rates
-func (c *HandRangeCell) VPIPRate() float64 {
-	if c.Dealt == 0 {
-		return 0
-	}
-	return float64(c.VPIP) / float64(c.Dealt) * 100
-}
-
-func (c *HandRangeCell) PFRRate() float64 {
-	if c.Dealt == 0 {
-		return 0
-	}
-	return float64(c.PFR) / float64(c.Dealt) * 100
-}
-
 func (c *HandRangeCell) FoldRate() float64 {
 	if c.Dealt == 0 {
 		return 0
@@ -126,11 +112,25 @@ func (c *HandRangeCell) FoldRate() float64 {
 	return float64(c.Fold) / float64(c.Dealt) * 100
 }
 
-func (c *HandRangeCell) ThreeBetRate() float64 {
+func (c *HandRangeCell) CallRate() float64 {
 	if c.Dealt == 0 {
 		return 0
 	}
-	return float64(c.ThreeBet) / float64(c.Dealt) * 100
+	return float64(c.Call) / float64(c.Dealt) * 100
+}
+
+func (c *HandRangeCell) BetRate() float64 {
+	if c.Dealt == 0 {
+		return 0
+	}
+	return float64(c.Bet) / float64(c.Dealt) * 100
+}
+
+func (c *HandRangeCell) RaiseRate() float64 {
+	if c.Dealt == 0 {
+		return 0
+	}
+	return float64(c.Raise) / float64(c.Dealt) * 100
 }
 
 // Overall rate helpers for Stats
