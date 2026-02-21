@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -26,6 +27,11 @@ type funcRule struct {
 type ignoreTag struct {
 	line      int
 	hasReason bool
+}
+
+type violation struct {
+	pos     token.Position
+	message string
 }
 
 var functionRules = []funcRule{
@@ -58,7 +64,7 @@ func main() {
 	}
 
 	fset := token.NewFileSet()
-	violations := 0
+	violations := make([]violation, 0, 32)
 	warned := map[string]struct{}{}
 
 	for _, path := range files {
@@ -71,51 +77,140 @@ func main() {
 		commentsByLine := collectIgnoreTags(fset, file)
 		relPath := filepath.ToSlash(path)
 
-		ast.Inspect(file, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
+		fileViolations, warnLines := analyzeFile(fset, file, relPath, commentsByLine)
+		for _, w := range warnLines {
+			key := fmt.Sprintf("%s:%d", relPath, w)
+			if _, exists := warned[key]; exists {
+				continue
+			}
+			fmt.Printf("WARN %s:%d: //i18n:ignore without reason\n", relPath, w)
+			warned[key] = struct{}{}
+		}
+		for _, v := range fileViolations {
+			fmt.Printf("%s:%d:%d: %s\n", relPath, v.pos.Line, v.pos.Column, v.message)
+		}
+		violations = append(violations, fileViolations...)
+	}
+
+	if len(violations) > 0 {
+		os.Exit(1)
+	}
+}
+
+func analyzeFile(fset *token.FileSet, file *ast.File, relPath string, commentsByLine map[int][]ignoreTag) ([]violation, []int) {
+	violations := make([]violation, 0, 8)
+	warnLines := make([]int, 0, 4)
+
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+
+		argIndexes := targetArgIndexes(call)
+		if len(argIndexes) == 0 {
+			return true
+		}
+
+		for _, idx := range argIndexes {
+			if idx >= len(call.Args) {
+				continue
+			}
+			arg := unwrapExpr(call.Args[idx])
+			if !isBareStringLiteral(arg) || isAllowedExpr(arg) {
+				continue
+			}
+
+			line := fset.Position(arg.Pos()).Line
+			ignored, warnLine := ignoreStatus(commentsByLine, line)
+			if ignored {
+				if warnLine > 0 {
+					warnLines = append(warnLines, warnLine)
+				}
+				continue
+			}
+
+			violations = append(violations, violation{
+				pos:     fset.Position(arg.Pos()),
+				message: "bare UI string literal (use lang.X or //i18n:ignore <reason>)",
+			})
+		}
+
+		return true
+	})
+
+	initAndVarViolations, extraWarnLines := detectEarlyLangCalls(fset, file, commentsByLine)
+	violations = append(violations, initAndVarViolations...)
+	warnLines = append(warnLines, extraWarnLines...)
+
+	sort.Ints(warnLines)
+	uniqWarns := make([]int, 0, len(warnLines))
+	for _, line := range warnLines {
+		if len(uniqWarns) == 0 || uniqWarns[len(uniqWarns)-1] != line {
+			uniqWarns = append(uniqWarns, line)
+		}
+	}
+
+	return violations, uniqWarns
+}
+
+func detectEarlyLangCalls(fset *token.FileSet, file *ast.File, commentsByLine map[int][]ignoreTag) ([]violation, []int) {
+	violations := make([]violation, 0, 4)
+	warnLines := make([]int, 0, 2)
+
+	checkCall := func(call *ast.CallExpr) {
+		if !isLangCall(call) {
+			return
+		}
+		line := fset.Position(call.Pos()).Line
+		ignored, warnLine := ignoreStatus(commentsByLine, line)
+		if ignored {
+			if warnLine > 0 {
+				warnLines = append(warnLines, warnLine)
+			}
+			return
+		}
+		violations = append(violations, violation{
+			pos:     fset.Position(call.Pos()),
+			message: "lang.X/L/N/XN must not be called during package init (use runtime/render-time resolution)",
+		})
+	}
+
+	inspectCalls := func(n ast.Node) {
+		ast.Inspect(n, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
 			if !ok {
 				return true
 			}
-
-			argIndexes := targetArgIndexes(call)
-			if len(argIndexes) == 0 {
-				return true
-			}
-
-			for _, idx := range argIndexes {
-				if idx >= len(call.Args) {
-					continue
-				}
-				arg := unwrapExpr(call.Args[idx])
-				if !isBareStringLiteral(arg) || isAllowedExpr(arg) {
-					continue
-				}
-
-				line := fset.Position(arg.Pos()).Line
-				ignored, warnLine := ignoreStatus(commentsByLine, line)
-				if ignored {
-					if warnLine > 0 {
-						key := fmt.Sprintf("%s:%d", relPath, warnLine)
-						if _, exists := warned[key]; !exists {
-							fmt.Printf("WARN %s:%d: //i18n:ignore without reason\n", relPath, warnLine)
-							warned[key] = struct{}{}
-						}
-					}
-					continue
-				}
-
-				pos := fset.Position(arg.Pos())
-				fmt.Printf("%s:%d:%d: bare UI string literal (use lang.X or //i18n:ignore <reason>)\n", relPath, pos.Line, pos.Column)
-				violations++
-			}
-
+			checkCall(call)
 			return true
 		})
 	}
 
-	if violations > 0 {
-		os.Exit(1)
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.GenDecl:
+			if d.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range d.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, value := range vs.Values {
+					inspectCalls(value)
+				}
+			}
+		case *ast.FuncDecl:
+			if d.Name == nil || d.Name.Name != "init" || d.Body == nil {
+				continue
+			}
+			inspectCalls(d.Body)
+		}
 	}
+
+	return violations, warnLines
 }
 
 func collectGoFiles(root string) ([]string, error) {
@@ -240,6 +335,10 @@ func isAllowedExpr(expr ast.Expr) bool {
 	if !ok {
 		return false
 	}
+	return isLangCall(call)
+}
+
+func isLangCall(call *ast.CallExpr) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return false
