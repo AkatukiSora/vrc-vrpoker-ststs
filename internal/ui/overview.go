@@ -25,7 +25,7 @@ func statCard(metric MetricDefinition, value string, valueColor color.Color, foo
 		if win == nil {
 			return
 		}
-		dialog.ShowInformation(metric.Label, metric.Help, win)
+		dialog.ShowInformation(metric.Label, metric.HelpText(), win)
 	})
 	helpBtn.Importance = widget.LowImportance
 	helpBtn.Resize(fyne.NewSize(24, helpBtn.MinSize().Height))

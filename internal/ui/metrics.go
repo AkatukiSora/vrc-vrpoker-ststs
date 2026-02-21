@@ -19,13 +19,21 @@ type MetricValue struct {
 type MetricDefinition struct {
 	ID             string
 	Label          string
-	Help           string
+	HelpKey        string
+	HelpFallback   string
 	MinSamples     int
 	ShowInOverview bool
 	ShowInPosition bool
 	StatsMetricID  *stats.MetricID
 	OverviewValue  func(*stats.Stats) MetricValue
 	PositionValue  func(*stats.PositionStats) MetricValue
+}
+
+func (m MetricDefinition) HelpText() string {
+	if m.HelpKey == "" {
+		return m.HelpFallback
+	}
+	return lang.X(m.HelpKey, m.HelpFallback)
 }
 
 type MetricPreset struct {
@@ -245,7 +253,8 @@ var metricRegistry = []MetricDefinition{
 	{
 		ID:             "hands",
 		Label:          "Hands",
-		Help:           lang.X("metric.hands.help", "Total complete hands included in current stats scope."),
+		HelpKey:        "metric.hands.help",
+		HelpFallback:   "Total complete hands included in current stats scope.",
 		MinSamples:     200,
 		ShowInOverview: true,
 		ShowInPosition: true,
@@ -265,7 +274,8 @@ var metricRegistry = []MetricDefinition{
 	{
 		ID:             "winRate",
 		Label:          "Win Rate",
-		Help:           lang.X("metric.win_rate.help", "Won hands / total hands."),
+		HelpKey:        "metric.win_rate.help",
+		HelpFallback:   "Won hands / total hands.",
 		MinSamples:     200,
 		ShowInOverview: true,
 		ShowInPosition: true,
@@ -287,7 +297,8 @@ var metricRegistry = []MetricDefinition{
 	{
 		ID:             "profit",
 		Label:          "Total Profit",
-		Help:           lang.X("metric.profit.help", "Total chips won minus invested chips."),
+		HelpKey:        "metric.profit.help",
+		HelpFallback:   "Total chips won minus invested chips.",
 		MinSamples:     200,
 		ShowInOverview: true,
 		ShowInPosition: true,
@@ -308,7 +319,7 @@ var metricRegistry = []MetricDefinition{
 	},
 }
 
-func addStatsMetricDefinition(id stats.MetricID, label, help string, showPosition bool) {
+func addStatsMetricDefinition(id stats.MetricID, label, helpKey, helpFallback string, showPosition bool) {
 	idCopy := id
 	minSamples := 50
 	if id == stats.MetricVPIP || id == stats.MetricPFR || id == stats.MetricGap || id == stats.MetricRFI || id == stats.MetricColdCall || id == stats.MetricWonWithoutSD || id == stats.MetricBBPer100 {
@@ -317,7 +328,8 @@ func addStatsMetricDefinition(id stats.MetricID, label, help string, showPositio
 	metricRegistry = append(metricRegistry, MetricDefinition{
 		ID:             string(id),
 		Label:          label,
-		Help:           help,
+		HelpKey:        helpKey,
+		HelpFallback:   helpFallback,
 		MinSamples:     minSamples,
 		ShowInOverview: true,
 		ShowInPosition: showPosition,
@@ -364,29 +376,29 @@ func vRateOrZero(s *stats.Stats, id stats.MetricID) float64 {
 }
 
 func init() {
-	addStatsMetricDefinition(stats.MetricVPIP, "VPIP", lang.X("metric.vpip.help", "Voluntarily Put Money In Pot. Preflop participation frequency."), true)
-	addStatsMetricDefinition(stats.MetricPFR, "PFR", lang.X("metric.pfr.help", "Preflop raise frequency."), true)
-	addStatsMetricDefinition(stats.MetricGap, "VPIP-PFR Gap", lang.X("metric.gap.help", "VPIP minus PFR. Larger gap implies more passive preflop entries."), false)
-	addStatsMetricDefinition(stats.MetricRFI, "RFI", lang.X("metric.rfi.help", "Raise First In frequency."), false)
-	addStatsMetricDefinition(stats.MetricColdCall, "Cold Call", lang.X("metric.cold_call.help", "Call preflop after someone opened while you were not yet in the pot."), false)
-	addStatsMetricDefinition(stats.MetricThreeBet, "3Bet", lang.X("metric.three_bet.help", "3-bet frequency when a 3-bet opportunity is present."), true)
-	addStatsMetricDefinition(stats.MetricFoldToThreeBet, "Fold to 3Bet", lang.X("metric.fold_to_three_bet.help", "Fold frequency when facing a 3-bet after opening."), true)
-	addStatsMetricDefinition(stats.MetricSteal, "Steal Attempt", lang.X("metric.steal.help", "Open-raise attempt from steal positions when folded to you."), false)
-	addStatsMetricDefinition(stats.MetricFoldToSteal, "Fold to Steal", lang.X("metric.fold_to_steal.help", "Fold frequency in blinds versus steal attempts."), false)
-	addStatsMetricDefinition(stats.MetricFlopCBet, "Flop CBet", lang.X("metric.flop_cbet.help", "Continuation bet frequency on flop as preflop aggressor."), false)
-	addStatsMetricDefinition(stats.MetricTurnCBet, "Turn CBet", lang.X("metric.turn_cbet.help", "Continuation bet frequency on turn."), false)
-	addStatsMetricDefinition(stats.MetricRiverCBet, "River CBet", lang.X("metric.river_cbet.help", "Continuation bet frequency on river."), false)
-	addStatsMetricDefinition(stats.MetricFoldToFlopCBet, "Fold to Flop CBet", lang.X("metric.fold_to_flop_cbet.help", "Fold frequency when facing flop c-bet."), false)
-	addStatsMetricDefinition(stats.MetricFoldToTurnCBet, "Fold to Turn CBet", lang.X("metric.fold_to_turn_cbet.help", "Fold frequency when facing turn c-bet."), false)
-	addStatsMetricDefinition(stats.MetricFoldToRiverCBet, "Fold to River CBet", lang.X("metric.fold_to_river_cbet.help", "Fold frequency when facing river c-bet."), false)
-	addStatsMetricDefinition(stats.MetricWTSD, "WTSD", lang.X("metric.wtsd.help", "Went to showdown after seeing flop."), false)
-	addStatsMetricDefinition(stats.MetricWSD, "W$SD", lang.X("metric.w_sd.help", "Won money at showdown."), true)
-	addStatsMetricDefinition(stats.MetricWWSF, "WWSF", lang.X("metric.wwsf.help", "Won when saw flop."), false)
-	addStatsMetricDefinition(stats.MetricAFq, "AFq", lang.X("metric.afq.help", "Aggression frequency: (bet+raise)/(actions postflop)."), false)
-	addStatsMetricDefinition(stats.MetricAF, "AF", lang.X("metric.af.help", "Aggression factor: (bet+raise)/call."), false)
-	addStatsMetricDefinition(stats.MetricCheckRaise, "Check-Raise", lang.X("metric.check_raise.help", "Check-raise frequency postflop."), false)
-	addStatsMetricDefinition(stats.MetricDelayedCBet, "Delayed CBet", lang.X("metric.delayed_cbet.help", "Delayed continuation bet frequency (check flop, bet turn)."), false)
-	addStatsMetricDefinition(stats.MetricWonWithoutSD, "Won without SD", lang.X("metric.won_without_sd.help", "Won hand without reaching showdown."), false)
-	addStatsMetricDefinition(stats.MetricWonAtSD, "Won at SD", lang.X("metric.won_at_sd.help", "Won hand at showdown."), false)
-	addStatsMetricDefinition(stats.MetricBBPer100, "bb/100", lang.X("metric.bb_per_100.help", "Net big blinds won per 100 hands."), false)
+	addStatsMetricDefinition(stats.MetricVPIP, "VPIP", "metric.vpip.help", "Voluntarily Put Money In Pot. Preflop participation frequency.", true)
+	addStatsMetricDefinition(stats.MetricPFR, "PFR", "metric.pfr.help", "Preflop raise frequency.", true)
+	addStatsMetricDefinition(stats.MetricGap, "VPIP-PFR Gap", "metric.gap.help", "VPIP minus PFR. Larger gap implies more passive preflop entries.", false)
+	addStatsMetricDefinition(stats.MetricRFI, "RFI", "metric.rfi.help", "Raise First In frequency.", false)
+	addStatsMetricDefinition(stats.MetricColdCall, "Cold Call", "metric.cold_call.help", "Call preflop after someone opened while you were not yet in the pot.", false)
+	addStatsMetricDefinition(stats.MetricThreeBet, "3Bet", "metric.three_bet.help", "3-bet frequency when a 3-bet opportunity is present.", true)
+	addStatsMetricDefinition(stats.MetricFoldToThreeBet, "Fold to 3Bet", "metric.fold_to_three_bet.help", "Fold frequency when facing a 3-bet after opening.", true)
+	addStatsMetricDefinition(stats.MetricSteal, "Steal Attempt", "metric.steal.help", "Open-raise attempt from steal positions when folded to you.", false)
+	addStatsMetricDefinition(stats.MetricFoldToSteal, "Fold to Steal", "metric.fold_to_steal.help", "Fold frequency in blinds versus steal attempts.", false)
+	addStatsMetricDefinition(stats.MetricFlopCBet, "Flop CBet", "metric.flop_cbet.help", "Continuation bet frequency on flop as preflop aggressor.", false)
+	addStatsMetricDefinition(stats.MetricTurnCBet, "Turn CBet", "metric.turn_cbet.help", "Continuation bet frequency on turn.", false)
+	addStatsMetricDefinition(stats.MetricRiverCBet, "River CBet", "metric.river_cbet.help", "Continuation bet frequency on river.", false)
+	addStatsMetricDefinition(stats.MetricFoldToFlopCBet, "Fold to Flop CBet", "metric.fold_to_flop_cbet.help", "Fold frequency when facing flop c-bet.", false)
+	addStatsMetricDefinition(stats.MetricFoldToTurnCBet, "Fold to Turn CBet", "metric.fold_to_turn_cbet.help", "Fold frequency when facing turn c-bet.", false)
+	addStatsMetricDefinition(stats.MetricFoldToRiverCBet, "Fold to River CBet", "metric.fold_to_river_cbet.help", "Fold frequency when facing river c-bet.", false)
+	addStatsMetricDefinition(stats.MetricWTSD, "WTSD", "metric.wtsd.help", "Went to showdown after seeing flop.", false)
+	addStatsMetricDefinition(stats.MetricWSD, "W$SD", "metric.w_sd.help", "Won money at showdown.", true)
+	addStatsMetricDefinition(stats.MetricWWSF, "WWSF", "metric.wwsf.help", "Won when saw flop.", false)
+	addStatsMetricDefinition(stats.MetricAFq, "AFq", "metric.afq.help", "Aggression frequency: (bet+raise)/(actions postflop).", false)
+	addStatsMetricDefinition(stats.MetricAF, "AF", "metric.af.help", "Aggression factor: (bet+raise)/call.", false)
+	addStatsMetricDefinition(stats.MetricCheckRaise, "Check-Raise", "metric.check_raise.help", "Check-raise frequency postflop.", false)
+	addStatsMetricDefinition(stats.MetricDelayedCBet, "Delayed CBet", "metric.delayed_cbet.help", "Delayed continuation bet frequency (check flop, bet turn).", false)
+	addStatsMetricDefinition(stats.MetricWonWithoutSD, "Won without SD", "metric.won_without_sd.help", "Won hand without reaching showdown.", false)
+	addStatsMetricDefinition(stats.MetricWonAtSD, "Won at SD", "metric.won_at_sd.help", "Won hand at showdown.", false)
+	addStatsMetricDefinition(stats.MetricBBPer100, "bb/100", "metric.bb_per_100.help", "Net big blinds won per 100 hands.", false)
 }

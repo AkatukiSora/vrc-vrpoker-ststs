@@ -115,7 +115,7 @@ func (st *SettingsTab) build() fyne.CanvasObject {
 		checks[metric.ID] = check
 
 		helpBtn := widget.NewButton(lang.X("settings.help_button", "?"), func() {
-			dialog.ShowInformation(metric.Label, metric.Help, st.win)
+			dialog.ShowInformation(metric.Label, metric.HelpText(), st.win)
 		})
 
 		row := container.NewBorder(nil, nil, nil, helpBtn, check)
