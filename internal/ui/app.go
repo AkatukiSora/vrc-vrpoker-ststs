@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -29,6 +30,9 @@ type App struct {
 	lastStats     *stats.Stats
 	lastHands     []*parser.Hand
 	lastLocalSeat int
+	rangeState    *HandRangeViewState
+	historyState  *HandHistoryViewState
+	metricState   *MetricVisibilityState
 
 	// UI tabs content containers (for refresh)
 	overviewContent  *fyne.Container
@@ -49,9 +53,18 @@ func Run() {
 	win.SetMaster()
 
 	appCtrl := &App{
-		fyneApp: a,
-		win:     win,
-		service: application.NewService(persistence.NewMemoryRepository()),
+		fyneApp:      a,
+		win:          win,
+		rangeState:   &HandRangeViewState{},
+		historyState: &HandHistoryViewState{SelectedHandID: -1},
+		metricState:  NewMetricVisibilityState(),
+	}
+
+	dbPath := filepath.Join(".", "vrpoker-stats.db")
+	if sqliteRepo, err := persistence.NewSQLiteRepository(dbPath); err == nil {
+		appCtrl.service = application.NewService(sqliteRepo)
+	} else {
+		appCtrl.service = application.NewService(persistence.NewMemoryRepository())
 	}
 
 	win.SetContent(appCtrl.buildUI())
@@ -73,9 +86,13 @@ func (a *App) buildUI() fyne.CanvasObject {
 		container.NewTabItem("Position Stats", a.posStatsContent),
 		container.NewTabItem("Hand Range", a.handRangeContent),
 		container.NewTabItem("Hand History", a.handHistContent),
-		container.NewTabItem("Settings", NewSettingsTab("", a.win, func(path string) {
-			go a.changeLogFile(path)
-		})),
+		container.NewTabItem("Settings", NewSettingsTab(
+			"",
+			a.win,
+			func(path string) { go a.changeLogFile(path) },
+			a.metricState,
+			func() { a.doRefreshCurrentTab() },
+		)),
 	)
 	a.tabs.SetTabLocation(container.TabLocationTop)
 
@@ -96,14 +113,15 @@ func (a *App) buildUI() fyne.CanvasObject {
 }
 
 func (a *App) initLogFile() {
-	a.doSetStatus("Searching for VRChat log files...")
+	a.doSetStatus("Importing VRChat logs...")
 
-	logPath, err := watcher.DetectLatestLogFile()
+	logPath, err := a.service.BootstrapImportAllLogs()
 	if err != nil {
 		a.doSetStatus(fmt.Sprintf("No log file found: %v — configure in Settings.", err))
 		return
 	}
 
+	a.doUpdateStats()
 	a.changeLogFile(logPath)
 }
 
@@ -134,8 +152,8 @@ func (a *App) changeLogFile(path string) {
 		return
 	}
 
-	w.OnNewData = func(lines []string) {
-		if err := a.service.ImportLines(lines); err != nil {
+	w.OnNewData = func(lines []string, startOffset int64, endOffset int64) {
+		if err := a.service.ImportLines(lines, startOffset, endOffset); err != nil {
 			a.doSetStatus(fmt.Sprintf("Import error: %v", err))
 			return
 		}
@@ -198,19 +216,19 @@ func (a *App) doRefreshCurrentTab() {
 	selected := a.tabs.SelectedIndex()
 	switch selected {
 	case 0: // Overview
-		obj := NewOverviewTab(s)
+		obj := NewOverviewTab(s, a.metricState)
 		a.overviewContent.Objects = []fyne.CanvasObject{obj}
 		a.overviewContent.Refresh()
 	case 1: // Position Stats
-		obj := NewPositionStatsTab(s)
+		obj := NewPositionStatsTab(s, a.metricState)
 		a.posStatsContent.Objects = []fyne.CanvasObject{obj}
 		a.posStatsContent.Refresh()
 	case 2: // Hand Range
-		obj := NewHandRangeTab(s, a.win)
+		obj := NewHandRangeTab(s, a.win, a.rangeState)
 		a.handRangeContent.Objects = []fyne.CanvasObject{obj}
 		a.handRangeContent.Refresh()
 	case 3: // Hand History
-		obj := NewHandHistoryTab(hands, localSeat)
+		obj := NewHandHistoryTab(hands, localSeat, a.historyState)
 		a.handHistContent.Objects = []fyne.CanvasObject{obj}
 		a.handHistContent.Refresh()
 	}

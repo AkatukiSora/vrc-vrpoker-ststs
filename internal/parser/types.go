@@ -17,14 +17,14 @@ type Position int
 
 const (
 	PosUnknown Position = iota
-	PosSB                // Small Blind
-	PosBB                // Big Blind
-	PosUTG               // Under the Gun
-	PosUTG1              // UTG+1
-	PosMP                // Middle Position
-	PosMP1               // MP+1
-	PosCO                // Cutoff
-	PosBTN               // Button (Dealer)
+	PosSB               // Small Blind
+	PosBB               // Big Blind
+	PosUTG              // Under the Gun
+	PosUTG1             // UTG+1
+	PosMP               // Middle Position
+	PosMP1              // MP+1
+	PosCO               // Cutoff
+	PosBTN              // Button (Dealer)
 )
 
 func (p Position) String() string {
@@ -119,7 +119,7 @@ func (s Street) String() string {
 // PlayerAction represents a single action by a player in a hand
 type PlayerAction struct {
 	Timestamp time.Time
-	PlayerID  int        // Seat number (0-7)
+	PlayerID  int // Seat number (0-7)
 	Street    Street
 	Action    ActionType
 	Amount    int
@@ -135,29 +135,29 @@ type PlayerHandInfo struct {
 	Won        bool
 	PotWon     int
 	// Pre-flop action summary
-	VPIP   bool // Voluntarily Put money In Pot (called or raised PF, not blind)
-	PFR    bool // Pre-Flop Raised
-	ThreeBet bool // 3-bet pre-flop
+	VPIP       bool // Voluntarily Put money In Pot (called or raised PF, not blind)
+	PFR        bool // Pre-Flop Raised
+	ThreeBet   bool // 3-bet pre-flop
 	FoldTo3Bet bool // Folded to a 3-bet
 	FoldedPF   bool // Folded pre-flop
 }
 
 // Hand represents a single poker hand
 type Hand struct {
-	ID             int
-	StartTime      time.Time
-	EndTime        time.Time
-	LocalPlayerSeat int   // Which seat is the local player
-	CommunityCards []Card
-	Players        map[int]*PlayerHandInfo // keyed by seat number
-	SBSeat         int
-	BBSeat         int
-	ActiveSeats    []int // seats with players in this hand
-	NumPlayers     int
-	TotalPot       int
-	WinnerSeat     int
-	WinType        string // "fold" or "showdown"
-	IsComplete     bool
+	ID              int
+	StartTime       time.Time
+	EndTime         time.Time
+	LocalPlayerSeat int // Which seat is the local player
+	CommunityCards  []Card
+	Players         map[int]*PlayerHandInfo // keyed by seat number
+	SBSeat          int
+	BBSeat          int
+	ActiveSeats     []int // seats with players in this hand
+	NumPlayers      int
+	TotalPot        int
+	WinnerSeat      int
+	WinType         string // "fold" or "showdown"
+	IsComplete      bool
 }
 
 // VRPokerWorldID is the VRChat world ID for VR Poker

@@ -6,41 +6,21 @@ on:
   pull_request:
     branches: ["master", "main"]
 
+# Cancel in-progress CI runs on new commits to the same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    name: Test
+  # ─────────────────────────────────────────────────────────────
+  # Verify: Lint + Tests (consolidated, fast, no CGO)
+  # ─────────────────────────────────────────────────────────────
+  # Runs: go mod tidy, gofmt, go vet, go test
+  # Single job reduces setup overhead compared to split parallel jobs
+  # ─────────────────────────────────────────────────────────────
+  verify:
+    name: Verify (Lint & Test)
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: jdx/mise-action@v2
-        with:
-          install: true   # installs tools from mise.toml (Go 1.26.0)
-
-      - name: Cache Go modules
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('go.sum') }}
-          restore-keys: ${{ runner.os }}-go-
-
-      - name: go mod tidy check
-        run: |
-          go mod tidy
-          git diff --exit-code go.mod go.sum
-
-      - name: Vet (parser/stats/watcher — no CGO/X11 needed)
-        run: go vet ./internal/parser/... ./internal/stats/... ./internal/watcher/...
-
-      - name: Unit tests (parser/stats/watcher)
-        run: mise run test
-
-  build:
-    name: Build (Wayland / Linux)
-    runs-on: ubuntu-latest
-    needs: test
     steps:
       - uses: actions/checkout@v4
 
@@ -48,14 +28,76 @@ jobs:
         with:
           install: true
 
-      - name: Cache Go modules
-        uses: actions/cache@v4
+      # Restore Go modules only (NOT build cache)
+      - name: Restore Go modules
+        uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('go.sum') }}
-          restore-keys: ${{ runner.os }}-go-
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-gomod-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-gomod-
+
+      - name: go mod tidy check
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: go fmt check
+        run: |
+          if [ -n "$(gofmt -s -l .)" ]; then
+            echo "Go code is not formatted:"
+            gofmt -s -d .
+            exit 1
+          fi
+
+      - name: Vet (parser/stats/watcher — no CGO/X11 needed)
+        run: go vet ./internal/parser/... ./internal/stats/... ./internal/watcher/...
+
+      - name: Unit tests (parser/stats/watcher)
+        run: go test -v ./internal/parser/... ./internal/stats/... ./internal/watcher/...
+
+      # Save Go modules cache after verify succeeds
+      - name: Save Go modules
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-gomod-${{ hashFiles('go.sum') }}
+
+  # ─────────────────────────────────────────────────────────────
+  # Build (depends on verify only)
+  # Optimized cache strategy: separate restore/save, unique sha key
+  # ─────────────────────────────────────────────────────────────
+  build:
+    name: Build (Wayland / Linux)
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+
+      # Restore Go modules cache (for go build)
+      - name: Restore Go modules
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-gomod-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-gomod-
+
+      # Restore build cache from broad prefix
+      # This allows hitting cache from previous runs even if sha differs
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        id: restore-gobuild
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-gobuild-wayland-${{ hashFiles('go.mod', 'go.sum', 'mise.toml', '**/*.go') }}
+          restore-keys: |
+            ${{ runner.os }}-gobuild-wayland-
 
       - name: Install Wayland & GL build dependencies
         run: |
@@ -76,6 +118,15 @@ jobs:
           ls -lh vrpoker-stats
           file vrpoker-stats
 
+      # Save build cache ONLY if restore didn't hit
+      # Using sha-based key to avoid "same key cannot be saved again"
+      - name: Save build cache
+        uses: actions/cache/save@v4
+        if: steps.restore-gobuild.outputs.cache-hit != 'true'
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-gobuild-wayland-${{ github.sha }}-${{ github.run_attempt }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -83,6 +134,10 @@ jobs:
           path: vrpoker-stats
           retention-days: 14
 
+  # ─────────────────────────────────────────────────────────────
+  # Release (triggered only on version tags)
+  # Uses same cache strategy as build job
+  # ─────────────────────────────────────────────────────────────
   release:
     name: Release
     runs-on: ubuntu-latest
@@ -96,6 +151,25 @@ jobs:
       - uses: jdx/mise-action@v2
         with:
           install: true
+
+      # Restore Go modules cache
+      - name: Restore Go modules
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-gomod-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-gomod-
+
+      # Restore build cache from broad prefix
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        id: restore-gobuild
+        with:
+          path: ~/.cache/go-build
+          key: ${{ runner.os }}-gobuild-wayland-${{ hashFiles('go.mod', 'go.sum', 'mise.toml', '**/*.go') }}
+          restore-keys: |
+            ${{ runner.os }}-gobuild-wayland-
 
       - name: Install Wayland & GL build dependencies
         run: |

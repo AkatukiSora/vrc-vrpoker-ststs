@@ -17,14 +17,24 @@ func (c *Calculator) Calculate(hands []*parser.Hand, localSeat int) *Stats {
 	s := &Stats{
 		ByPosition: make(map[parser.Position]*PositionStats),
 		HandRange:  newHandRangeTable(),
+		Metrics:    make(map[MetricID]MetricValue),
 	}
+	ma := newMetricAccumulator()
 
 	for _, h := range hands {
 		if !h.IsComplete {
 			continue
 		}
 
-		localInfo, ok := h.Players[localSeat]
+		handSeat := localSeat
+		if h.LocalPlayerSeat >= 0 {
+			handSeat = h.LocalPlayerSeat
+		}
+		if handSeat < 0 {
+			continue
+		}
+
+		localInfo, ok := h.Players[handSeat]
 		if !ok {
 			// We might not be in this hand
 			continue
@@ -37,7 +47,7 @@ func (c *Calculator) Calculate(hands []*parser.Hand, localSeat int) *Stats {
 		ps.Hands++
 
 		// Financial
-		invested := c.investedAmount(h, localSeat)
+		invested := c.investedAmount(h, handSeat)
 		ps.Invested += invested
 		ps.PotWon += localInfo.PotWon
 		s.TotalPotWon += localInfo.PotWon
@@ -61,8 +71,8 @@ func (c *Calculator) Calculate(hands []*parser.Hand, localSeat int) *Stats {
 			ps.PFR++
 		}
 
-		// 3bet opportunity: any time there was an open raise before us PF
-		if localInfo.ThreeBet || localInfo.FoldTo3Bet {
+		// 3bet opportunity: faced preflop raise before committing as opener
+		if hasThreeBetOpportunityApprox(localInfo, h) {
 			s.ThreeBetOpportunities++
 			ps.ThreeBetOpp++
 		}
@@ -72,10 +82,12 @@ func (c *Calculator) Calculate(hands []*parser.Hand, localSeat int) *Stats {
 		}
 
 		// Fold to 3bet
-		if localInfo.FoldTo3Bet {
+		if hasFoldToThreeBetOpportunityApprox(localInfo, h) {
 			s.FoldTo3BetOpportunities++
-			s.FoldTo3BetHands++
 			ps.FoldTo3BetOpp++
+		}
+		if localInfo.FoldTo3Bet {
+			s.FoldTo3BetHands++
 			ps.FoldTo3Bet++
 		}
 
@@ -91,9 +103,13 @@ func (c *Calculator) Calculate(hands []*parser.Hand, localSeat int) *Stats {
 
 		// Hand range table update
 		if len(localInfo.HoleCards) == 2 {
-			c.updateHandRange(s.HandRange, localInfo, pos)
+			c.updateHandRange(s.HandRange, h, localInfo, pos)
 		}
+
+		ma.consumeHand(h, localInfo, invested)
 	}
+
+	ma.finalize(s)
 
 	return s
 }
@@ -122,7 +138,7 @@ func (c *Calculator) investedAmount(h *parser.Hand, seat int) int {
 }
 
 // updateHandRange updates the hand range table for a hand
-func (c *Calculator) updateHandRange(table *HandRangeTable, pi *parser.PlayerHandInfo, pos parser.Position) {
+func (c *Calculator) updateHandRange(table *HandRangeTable, h *parser.Hand, pi *parser.PlayerHandInfo, pos parser.Position) {
 	card1 := pi.HoleCards[0]
 	card2 := pi.HoleCards[1]
 
@@ -161,28 +177,48 @@ func (c *Calculator) updateHandRange(table *HandRangeTable, pi *parser.PlayerHan
 	cell := table.Cells[r][c2]
 	if cell == nil {
 		cell = &HandRangeCell{
-			Rank1:      RankOrder[row],
-			Rank2:      RankOrder[col],
-			Suited:     suited,
-			IsPair:     isPair,
-			ByPosition: make(map[parser.Position]*HandRangePositionCell),
+			Rank1:       RankOrder[row],
+			Rank2:       RankOrder[col],
+			Suited:      suited,
+			IsPair:      isPair,
+			ByPosition:  make(map[parser.Position]*HandRangePositionCell),
+			ByHandClass: make(map[string]*HandClassStats),
 		}
 		table.Cells[r][c2] = cell
 	}
 
 	cell.Dealt++
-	if action, ok := preflopActionSummary(pi); ok {
-		switch action {
-		case parser.ActionFold:
-			cell.Fold++
-		case parser.ActionCall:
-			cell.Call++
-		case parser.ActionBet:
-			cell.Bet++
-		case parser.ActionRaise:
-			cell.Raise++
+	if pfAction, ok := preflopRangeActionSummary(h, pi); ok {
+		cell.Actions[pfAction]++
+		table.TotalActions[pfAction]++
+	}
+
+	classes := handClasses(h, pi)
+	if len(classes) > 0 {
+		overallAction, overallOK := overallActionSummary(h, pi)
+		for _, className := range classes {
+			cellClass := cell.ByHandClass[className]
+			if cellClass == nil {
+				cellClass = &HandClassStats{}
+				cell.ByHandClass[className] = cellClass
+			}
+			cellClass.Hands++
+			if overallOK {
+				cellClass.Actions[overallAction]++
+			}
+
+			hcs := table.ByHandClass[className]
+			if hcs == nil {
+				hcs = &HandClassStats{}
+				table.ByHandClass[className] = hcs
+			}
+			hcs.Hands++
+			if overallOK {
+				hcs.Actions[overallAction]++
+			}
 		}
 	}
+
 	if pi.Won {
 		cell.Won++
 	}
@@ -194,29 +230,21 @@ func (c *Calculator) updateHandRange(table *HandRangeTable, pi *parser.PlayerHan
 		cell.ByPosition[pos] = ppc
 	}
 	ppc.Dealt++
-	if action, ok := preflopActionSummary(pi); ok {
-		switch action {
-		case parser.ActionFold:
-			ppc.Fold++
-		case parser.ActionCall:
-			ppc.Call++
-		case parser.ActionBet:
-			ppc.Bet++
-		case parser.ActionRaise:
-			ppc.Raise++
-		}
+	if pfAction, ok := preflopRangeActionSummary(h, pi); ok {
+		ppc.Actions[pfAction]++
 	}
 	if pi.Won {
 		ppc.Won++
 	}
 }
 
-func preflopActionSummary(pi *parser.PlayerHandInfo) (parser.ActionType, bool) {
+func preflopRangeActionSummary(h *parser.Hand, pi *parser.PlayerHandInfo) (RangeActionBucket, bool) {
 	if pi == nil {
-		return parser.ActionUnknown, false
+		return RangeActionCheck, false
 	}
 
-	last := parser.ActionUnknown
+	lastAction := parser.ActionUnknown
+	lastAmount := 0
 	for _, act := range pi.Actions {
 		if act.Street != parser.StreetPreFlop {
 			continue
@@ -224,33 +252,136 @@ func preflopActionSummary(pi *parser.PlayerHandInfo) (parser.ActionType, bool) {
 		switch act.Action {
 		case parser.ActionBlindSB, parser.ActionBlindBB:
 			continue
-		case parser.ActionCheck, parser.ActionCall:
-			last = parser.ActionCall
-		case parser.ActionBet:
-			last = parser.ActionBet
-		case parser.ActionRaise:
-			last = parser.ActionRaise
-		case parser.ActionFold:
-			last = parser.ActionFold
-		case parser.ActionAllIn:
-			last = parser.ActionRaise
+		case parser.ActionCheck, parser.ActionCall, parser.ActionBet, parser.ActionRaise, parser.ActionFold, parser.ActionAllIn:
+			lastAction = act.Action
+			lastAmount = act.Amount
 		}
 	}
 
-	if last == parser.ActionUnknown {
+	if lastAction == parser.ActionUnknown {
 		if pi.FoldedPF {
-			return parser.ActionFold, true
+			return RangeActionFold, true
 		}
 		if pi.PFR || pi.ThreeBet {
-			return parser.ActionRaise, true
+			return RangeActionBetHalf, true
 		}
 		if pi.VPIP {
-			return parser.ActionCall, true
+			return RangeActionCall, true
 		}
-		return parser.ActionUnknown, false
+		return RangeActionCheck, false
 	}
 
-	return last, true
+	switch lastAction {
+	case parser.ActionFold:
+		return RangeActionFold, true
+	case parser.ActionCheck:
+		return RangeActionCheck, true
+	case parser.ActionCall:
+		return RangeActionCall, true
+	case parser.ActionBet, parser.ActionRaise, parser.ActionAllIn:
+		return bucketByBBMultiple(lastAmount, bbAmountFromHand(h)), true
+	}
+
+	return RangeActionCheck, false
+}
+
+func overallActionSummary(h *parser.Hand, pi *parser.PlayerHandInfo) (RangeActionBucket, bool) {
+	if pi == nil {
+		return RangeActionCheck, false
+	}
+
+	lastAction := parser.ActionUnknown
+	lastAmount := 0
+	for _, act := range pi.Actions {
+		switch act.Action {
+		case parser.ActionBlindSB, parser.ActionBlindBB:
+			continue
+		case parser.ActionCheck, parser.ActionCall, parser.ActionBet, parser.ActionRaise, parser.ActionFold, parser.ActionAllIn:
+			lastAction = act.Action
+			lastAmount = act.Amount
+		}
+	}
+
+	if lastAction == parser.ActionUnknown {
+		return RangeActionCheck, false
+	}
+
+	switch lastAction {
+	case parser.ActionFold:
+		return RangeActionFold, true
+	case parser.ActionCheck:
+		return RangeActionCheck, true
+	case parser.ActionCall:
+		return RangeActionCall, true
+	case parser.ActionBet, parser.ActionRaise, parser.ActionAllIn:
+		return bucketByPotFraction(lastAmount, h), true
+	default:
+		return RangeActionCheck, false
+	}
+}
+
+func bbAmountFromHand(h *parser.Hand) int {
+	if h == nil || h.BBSeat < 0 {
+		return 0
+	}
+	bb := h.Players[h.BBSeat]
+	if bb == nil {
+		return 0
+	}
+	for _, act := range bb.Actions {
+		if act.Action == parser.ActionBlindBB && act.Amount > 0 {
+			return act.Amount
+		}
+	}
+	return 0
+}
+
+func bucketByBBMultiple(amount, bb int) RangeActionBucket {
+	if amount <= 0 {
+		return RangeActionCheck
+	}
+	if bb <= 0 {
+		bb = 20
+	}
+	multiple := float64(amount) / float64(bb)
+	switch {
+	case multiple <= 2.5:
+		return RangeActionBetSmall
+	case multiple <= 4.0:
+		return RangeActionBetHalf
+	case multiple <= 6.0:
+		return RangeActionBetTwoThird
+	case multiple <= 10.0:
+		return RangeActionBetPot
+	default:
+		return RangeActionBetOver
+	}
+}
+
+func bucketByPotFraction(amount int, h *parser.Hand) RangeActionBucket {
+	if amount <= 0 {
+		return RangeActionCheck
+	}
+	pot := 0
+	if h != nil {
+		pot = h.TotalPot
+	}
+	if pot <= 0 {
+		return RangeActionBetHalf
+	}
+	ratio := float64(amount) / float64(pot)
+	switch {
+	case ratio <= 0.38:
+		return RangeActionBetSmall
+	case ratio <= 0.58:
+		return RangeActionBetHalf
+	case ratio <= 0.78:
+		return RangeActionBetTwoThird
+	case ratio <= 1.15:
+		return RangeActionBetPot
+	default:
+		return RangeActionBetOver
+	}
 }
 
 // newHandRangeTable initializes the 13x13 hand range table with empty cells
@@ -275,14 +406,16 @@ func newHandRangeTable() *HandRangeTable {
 			_ = r1
 			_ = r2
 			t.Cells[i][j] = &HandRangeCell{
-				Rank1:      rank1,
-				Rank2:      rank2,
-				Suited:     suited && !isPair,
-				IsPair:     isPair,
-				ByPosition: make(map[parser.Position]*HandRangePositionCell),
+				Rank1:       rank1,
+				Rank2:       rank2,
+				Suited:      suited && !isPair,
+				IsPair:      isPair,
+				ByPosition:  make(map[parser.Position]*HandRangePositionCell),
+				ByHandClass: make(map[string]*HandClassStats),
 			}
 		}
 	}
+	t.ByHandClass = make(map[string]*HandClassStats)
 	return t
 }
 
@@ -298,4 +431,609 @@ func max13(a, b int) int {
 		return a
 	}
 	return b
+}
+
+type metricAccumulator struct {
+	counts       map[MetricID]int
+	opps         map[MetricID]int
+	aggPostflop  int
+	callPostflop int
+	foldPostflop int
+	bbNet        float64
+	bbHands      int
+}
+
+func newMetricAccumulator() *metricAccumulator {
+	return &metricAccumulator{
+		counts: make(map[MetricID]int),
+		opps:   make(map[MetricID]int),
+	}
+}
+
+func (m *metricAccumulator) incOpp(id MetricID) {
+	m.opps[id]++
+}
+
+func (m *metricAccumulator) incCount(id MetricID) {
+	m.counts[id]++
+}
+
+func (m *metricAccumulator) consumeHand(h *parser.Hand, pi *parser.PlayerHandInfo, invested int) {
+	if h == nil || pi == nil {
+		return
+	}
+
+	// Hand-frequency metrics
+	m.incOpp(MetricVPIP)
+	if pi.VPIP {
+		m.incCount(MetricVPIP)
+	}
+
+	m.incOpp(MetricPFR)
+	if pi.PFR {
+		m.incCount(MetricPFR)
+	}
+
+	if hasRFIOpportunityApprox(pi, h) {
+		m.incOpp(MetricRFI)
+	}
+	if didRFIApprox(pi, h) {
+		m.incCount(MetricRFI)
+	}
+
+	m.incOpp(MetricColdCall)
+	if isColdCallApprox(pi, h) {
+		m.incCount(MetricColdCall)
+	}
+
+	m.incOpp(MetricWonWithoutSD)
+	if pi.Won && !pi.ShowedDown {
+		m.incCount(MetricWonWithoutSD)
+	}
+
+	bb := bbAmountFromHand(h)
+	if bb > 0 {
+		m.bbNet += float64(pi.PotWon-invested) / float64(bb)
+		m.bbHands++
+	}
+
+	// Situational metrics already explicitly tracked by parser
+	if hasThreeBetOpportunityApprox(pi, h) {
+		m.incOpp(MetricThreeBet)
+	}
+	if pi.ThreeBet {
+		m.incCount(MetricThreeBet)
+	}
+
+	if hasFoldToThreeBetOpportunityApprox(pi, h) {
+		m.incOpp(MetricFoldToThreeBet)
+	}
+	if pi.FoldTo3Bet {
+		m.incCount(MetricFoldToThreeBet)
+	}
+
+	if isStealOpportunity(pi, h) {
+		m.incOpp(MetricSteal)
+		if isStealAttempt(pi) {
+			m.incCount(MetricSteal)
+		}
+	}
+
+	if isFoldToStealOpportunity(pi, h) {
+		m.incOpp(MetricFoldToSteal)
+		if pi.FoldedPF {
+			m.incCount(MetricFoldToSteal)
+		}
+	}
+
+	sawFlop := sawFlop(pi, h)
+	if sawFlop {
+		m.incOpp(MetricWTSD)
+		if pi.ShowedDown {
+			m.incCount(MetricWTSD)
+		}
+
+		m.incOpp(MetricWWSF)
+		if pi.Won {
+			m.incCount(MetricWWSF)
+		}
+	}
+
+	if pi.ShowedDown {
+		m.incOpp(MetricWSD)
+		m.incOpp(MetricWonAtSD)
+		if pi.Won {
+			m.incCount(MetricWSD)
+			m.incCount(MetricWonAtSD)
+		}
+	}
+
+	flopAgg := hasAggressionOnStreet(pi, parser.StreetFlop)
+	turnAgg := hasAggressionOnStreet(pi, parser.StreetTurn)
+	riverAgg := hasAggressionOnStreet(pi, parser.StreetRiver)
+
+	if pi.PFR && len(h.CommunityCards) >= 3 {
+		m.incOpp(MetricFlopCBet)
+		if flopAgg {
+			m.incCount(MetricFlopCBet)
+		}
+	}
+
+	if pi.PFR && len(h.CommunityCards) >= 4 && flopAgg {
+		m.incOpp(MetricTurnCBet)
+		if turnAgg {
+			m.incCount(MetricTurnCBet)
+		}
+	}
+
+	if pi.PFR && len(h.CommunityCards) >= 5 && flopAgg && turnAgg {
+		m.incOpp(MetricRiverCBet)
+		if riverAgg {
+			m.incCount(MetricRiverCBet)
+		}
+	}
+
+	if pi.PFR && len(h.CommunityCards) >= 4 && !flopAgg {
+		m.incOpp(MetricDelayedCBet)
+		if turnAgg {
+			m.incCount(MetricDelayedCBet)
+		}
+	}
+
+	if !pi.PFR && len(h.CommunityCards) >= 3 && hasOpponentAggressionOnStreet(h, pi.SeatID, parser.StreetFlop) && actedOnStreet(pi, parser.StreetFlop) {
+		m.incOpp(MetricFoldToFlopCBet)
+		if hasFoldOnStreet(pi, parser.StreetFlop) {
+			m.incCount(MetricFoldToFlopCBet)
+		}
+	}
+	if !pi.PFR && len(h.CommunityCards) >= 4 && hasOpponentAggressionOnStreet(h, pi.SeatID, parser.StreetTurn) && actedOnStreet(pi, parser.StreetTurn) {
+		m.incOpp(MetricFoldToTurnCBet)
+		if hasFoldOnStreet(pi, parser.StreetTurn) {
+			m.incCount(MetricFoldToTurnCBet)
+		}
+	}
+	if !pi.PFR && len(h.CommunityCards) >= 5 && hasOpponentAggressionOnStreet(h, pi.SeatID, parser.StreetRiver) && actedOnStreet(pi, parser.StreetRiver) {
+		m.incOpp(MetricFoldToRiverCBet)
+		if hasFoldOnStreet(pi, parser.StreetRiver) {
+			m.incCount(MetricFoldToRiverCBet)
+		}
+	}
+
+	if hasCheckRaiseApprox(pi) {
+		m.incOpp(MetricCheckRaise)
+		m.incCount(MetricCheckRaise)
+	} else if participatedPostFlop(pi) {
+		m.incOpp(MetricCheckRaise)
+	}
+
+	agg, call, fold := postFlopActionCounts(pi)
+	m.aggPostflop += agg
+	m.callPostflop += call
+	m.foldPostflop += fold
+}
+
+func (m *metricAccumulator) finalize(s *Stats) {
+	if s == nil {
+		return
+	}
+
+	// Derived count for gap (VPIP - PFR)
+	m.opps[MetricGap] = m.opps[MetricVPIP]
+	if vpipCount, ok := m.counts[MetricVPIP]; ok {
+		m.counts[MetricGap] = vpipCount - m.counts[MetricPFR]
+	}
+
+	for _, def := range metricRegistry {
+		threshold := confidenceThreshold(def.SampleClass)
+		rate := metricRate(def.ID, m.counts[def.ID], m.opps[def.ID], m)
+		count := m.counts[def.ID]
+		opp := m.opps[def.ID]
+		s.Metrics[def.ID] = MetricValue{
+			ID:          def.ID,
+			Count:       count,
+			Opportunity: opp,
+			Rate:        rate,
+			Confident:   opp >= threshold,
+			MinSample:   threshold,
+			Format:      def.Format,
+		}
+	}
+}
+
+func metricRate(id MetricID, count, opp int, m *metricAccumulator) float64 {
+	switch id {
+	case MetricAFq:
+		total := m.aggPostflop + m.callPostflop + m.foldPostflop
+		if total == 0 {
+			return 0
+		}
+		m.opps[MetricAFq] = total
+		m.counts[MetricAFq] = m.aggPostflop
+		return float64(m.aggPostflop) / float64(total) * 100
+	case MetricAF:
+		total := m.aggPostflop + m.callPostflop
+		m.opps[MetricAF] = total
+		m.counts[MetricAF] = m.aggPostflop
+		if m.callPostflop == 0 {
+			if m.aggPostflop > 0 {
+				return float64(m.aggPostflop)
+			}
+			return 0
+		}
+		return float64(m.aggPostflop) / float64(m.callPostflop)
+	case MetricGap:
+		if opp == 0 {
+			return 0
+		}
+		return float64(m.counts[MetricVPIP]-m.counts[MetricPFR]) / float64(opp) * 100
+	case MetricBBPer100:
+		m.opps[MetricBBPer100] = m.bbHands
+		if m.bbHands == 0 {
+			return 0
+		}
+		return m.bbNet / float64(m.bbHands) * 100
+	default:
+		if opp == 0 {
+			return 0
+		}
+		return float64(count) / float64(opp) * 100
+	}
+}
+
+func sawFlop(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
+	if pi == nil || h == nil {
+		return false
+	}
+	if len(h.CommunityCards) < 3 {
+		return false
+	}
+	if pi.FoldedPF {
+		return false
+	}
+	return true
+}
+
+func hasAggressionOnStreet(pi *parser.PlayerHandInfo, street parser.Street) bool {
+	if pi == nil {
+		return false
+	}
+	for _, a := range pi.Actions {
+		if a.Street != street {
+			continue
+		}
+		if a.Action == parser.ActionBet || a.Action == parser.ActionRaise || a.Action == parser.ActionAllIn {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCallOnStreet(pi *parser.PlayerHandInfo, street parser.Street) bool {
+	if pi == nil {
+		return false
+	}
+	for _, a := range pi.Actions {
+		if a.Street == street && a.Action == parser.ActionCall {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFoldOnStreet(pi *parser.PlayerHandInfo, street parser.Street) bool {
+	if pi == nil {
+		return false
+	}
+	for _, a := range pi.Actions {
+		if a.Street == street && a.Action == parser.ActionFold {
+			return true
+		}
+	}
+	return false
+}
+
+func actedOnStreet(pi *parser.PlayerHandInfo, street parser.Street) bool {
+	if pi == nil {
+		return false
+	}
+	for _, a := range pi.Actions {
+		if a.Street == street {
+			return true
+		}
+	}
+	return false
+}
+
+func hasOpponentAggressionOnStreet(h *parser.Hand, localSeat int, street parser.Street) bool {
+	if h == nil {
+		return false
+	}
+	for seat, p := range h.Players {
+		if p == nil || seat == localSeat {
+			continue
+		}
+		for _, a := range p.Actions {
+			if a.Street != street {
+				continue
+			}
+			if a.Action == parser.ActionBet || a.Action == parser.ActionRaise || a.Action == parser.ActionAllIn {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func postFlopActionCounts(pi *parser.PlayerHandInfo) (agg, call, fold int) {
+	if pi == nil {
+		return 0, 0, 0
+	}
+	for _, a := range pi.Actions {
+		if a.Street == parser.StreetPreFlop || a.Street == parser.StreetShowdown {
+			continue
+		}
+		switch a.Action {
+		case parser.ActionBet, parser.ActionRaise, parser.ActionAllIn:
+			agg++
+		case parser.ActionCall:
+			call++
+		case parser.ActionFold:
+			fold++
+		}
+	}
+	return agg, call, fold
+}
+
+func participatedPostFlop(pi *parser.PlayerHandInfo) bool {
+	if pi == nil {
+		return false
+	}
+	for _, a := range pi.Actions {
+		if a.Street != parser.StreetPreFlop && a.Street != parser.StreetShowdown {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCheckRaiseApprox(pi *parser.PlayerHandInfo) bool {
+	if pi == nil {
+		return false
+	}
+	checkedByStreet := map[parser.Street]bool{}
+	for _, a := range pi.Actions {
+		if a.Street == parser.StreetPreFlop || a.Street == parser.StreetShowdown {
+			continue
+		}
+		if a.Action == parser.ActionCheck {
+			checkedByStreet[a.Street] = true
+		}
+		if checkedByStreet[a.Street] && (a.Action == parser.ActionRaise || a.Action == parser.ActionBet || a.Action == parser.ActionAllIn) {
+			return true
+		}
+	}
+	return false
+}
+
+func isStealOpportunity(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
+	if pi == nil || h == nil {
+		return false
+	}
+	if pi.Position != parser.PosCO && pi.Position != parser.PosBTN && pi.Position != parser.PosSB {
+		return false
+	}
+	return hasRFIOpportunityApprox(pi, h)
+}
+
+func isStealAttempt(pi *parser.PlayerHandInfo) bool {
+	if pi == nil {
+		return false
+	}
+	for _, a := range pi.Actions {
+		if a.Street != parser.StreetPreFlop {
+			continue
+		}
+		if a.Action == parser.ActionBet || a.Action == parser.ActionRaise || a.Action == parser.ActionAllIn {
+			return true
+		}
+		if a.Action == parser.ActionCall || a.Action == parser.ActionFold || a.Action == parser.ActionCheck {
+			return false
+		}
+	}
+	return false
+}
+
+func isFoldToStealOpportunity(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
+	if pi == nil || h == nil {
+		return false
+	}
+	if pi.Position != parser.PosSB && pi.Position != parser.PosBB {
+		return false
+	}
+	openSeat, ok := detectStealOpenSeat(h)
+	if !ok || openSeat == pi.SeatID {
+		return false
+	}
+	seq := preflopActionSequence(h)
+	seenOpen := false
+	for _, sa := range seq {
+		if sa.seat == openSeat && isAggressivePreflop(sa.act.Action) {
+			seenOpen = true
+			continue
+		}
+		if !seenOpen {
+			continue
+		}
+		if sa.seat == pi.SeatID {
+			return true
+		}
+	}
+	return false
+}
+
+func isColdCallApprox(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
+	if pi == nil || h == nil {
+		return false
+	}
+	if pi.PFR || pi.ThreeBet || !pi.VPIP {
+		return false
+	}
+	if pi.Position == parser.PosSB {
+		if hasCallOnStreet(pi, parser.StreetPreFlop) {
+			bb := bbAmountFromHand(h)
+			if bb <= 0 {
+				return false
+			}
+			for _, a := range pi.Actions {
+				if a.Street == parser.StreetPreFlop && a.Action == parser.ActionCall && a.Amount > bb {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if pi.Position == parser.PosBB {
+		for seat, p := range h.Players {
+			if p == nil || seat == pi.SeatID {
+				continue
+			}
+			if p.PFR {
+				return hasCallOnStreet(pi, parser.StreetPreFlop)
+			}
+		}
+		return false
+	}
+	return hasCallOnStreet(pi, parser.StreetPreFlop)
+}
+
+func hasThreeBetOpportunityApprox(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
+	if pi == nil || h == nil {
+		return false
+	}
+	if pi.ThreeBet {
+		return true
+	}
+	for seat, p := range h.Players {
+		if p == nil || seat == pi.SeatID {
+			continue
+		}
+		if p.PFR {
+			return hasCallOnStreet(pi, parser.StreetPreFlop) || pi.FoldedPF
+		}
+	}
+	return false
+}
+
+func hasFoldToThreeBetOpportunityApprox(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
+	if pi == nil || h == nil {
+		return false
+	}
+	if pi.FoldTo3Bet {
+		return true
+	}
+	if !pi.PFR {
+		return false
+	}
+	for seat, p := range h.Players {
+		if p == nil || seat == pi.SeatID {
+			continue
+		}
+		if p.ThreeBet {
+			return true
+		}
+	}
+	return false
+}
+
+type seqAction struct {
+	seat int
+	act  parser.PlayerAction
+}
+
+func preflopActionSequence(h *parser.Hand) []seqAction {
+	if h == nil {
+		return nil
+	}
+	out := make([]seqAction, 0)
+	for seat, p := range h.Players {
+		if p == nil {
+			continue
+		}
+		for _, a := range p.Actions {
+			if a.Street != parser.StreetPreFlop {
+				continue
+			}
+			if a.Action == parser.ActionBlindSB || a.Action == parser.ActionBlindBB {
+				continue
+			}
+			out = append(out, seqAction{seat: seat, act: a})
+		}
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && (out[j].act.Timestamp.Before(out[j-1].act.Timestamp) || (out[j].act.Timestamp.Equal(out[j-1].act.Timestamp) && out[j].seat < out[j-1].seat)); j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
+}
+
+func isAggressivePreflop(a parser.ActionType) bool {
+	return a == parser.ActionBet || a == parser.ActionRaise || a == parser.ActionAllIn
+}
+
+func hasRFIOpportunityApprox(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
+	if pi == nil || h == nil {
+		return false
+	}
+	seq := preflopActionSequence(h)
+	for _, sa := range seq {
+		if sa.seat == pi.SeatID {
+			return true
+		}
+		if sa.act.Action == parser.ActionCall || isAggressivePreflop(sa.act.Action) {
+			return false
+		}
+	}
+	return false
+}
+
+func didRFIApprox(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
+	if !hasRFIOpportunityApprox(pi, h) {
+		return false
+	}
+	for _, a := range pi.Actions {
+		if a.Street != parser.StreetPreFlop {
+			continue
+		}
+		if isAggressivePreflop(a.Action) {
+			return true
+		}
+		if a.Action == parser.ActionCall || a.Action == parser.ActionFold || a.Action == parser.ActionCheck {
+			return false
+		}
+	}
+	return false
+}
+
+func detectStealOpenSeat(h *parser.Hand) (int, bool) {
+	if h == nil {
+		return -1, false
+	}
+	seq := preflopActionSequence(h)
+	for _, sa := range seq {
+		if sa.act.Action == parser.ActionCall {
+			return -1, false
+		}
+		if isAggressivePreflop(sa.act.Action) {
+			pi := h.Players[sa.seat]
+			if pi == nil {
+				return -1, false
+			}
+			if pi.Position == parser.PosCO || pi.Position == parser.PosBTN || pi.Position == parser.PosSB {
+				return sa.seat, true
+			}
+			return -1, false
+		}
+	}
+	return -1, false
 }

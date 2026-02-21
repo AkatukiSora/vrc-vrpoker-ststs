@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	fyne.io/fyne/v2 v2.7.2
 	github.com/fsnotify/fsnotify v1.9.0
+	github.com/mattn/go-sqlite3 v1.14.24
 )
 
 require (
