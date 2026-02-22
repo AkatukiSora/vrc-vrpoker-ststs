@@ -139,43 +139,43 @@ jobs:
           retention-days: 14
 
   # ─────────────────────────────────────────────────────────────
-  # Build (Windows)
+  # Build (Windows cross-compile on Linux)
   # Runs on PRs and pushes to catch Windows regressions early
   # ─────────────────────────────────────────────────────────────
   build-windows:
-    name: Build (Windows)
-    runs-on: windows-latest
+    name: Build (Windows Cross / Linux)
+    runs-on: ubuntu-latest
     needs: verify
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-go@v5
+      - uses: jdx/mise-action@v2
         with:
-          go-version-file: go.mod
-          cache: true
+          install: true
 
-      - name: Install MinGW toolchain (CGO for Windows)
-        uses: msys2/setup-msys2@v2
+      - name: Restore Go modules
+        uses: actions/cache/restore@v4
         with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            mingw-w64-x86_64-gcc
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-gomod-${{ hashFiles('go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-gomod-
+
+      - name: Install cross-build dependencies (MinGW)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            mingw-w64 \
+            gcc \
+            pkg-config
 
       - name: Show toolchain versions
-        shell: pwsh
         run: |
           go version
-          & "C:\msys64\mingw64\bin\gcc.exe" --version
+          x86_64-w64-mingw32-gcc --version
 
-      - name: Build Windows binary
-        shell: pwsh
-        run: |
-          $env:CGO_ENABLED = "1"
-          $env:GOOS = "windows"
-          $env:GOARCH = "amd64"
-          $env:CC = "C:\msys64\mingw64\bin\gcc.exe"
-          go build -o vrpoker-stats.exe .
+      - name: Build Windows binary (cross)
+        run: mise run build-windows
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -212,6 +212,7 @@ jobs:
 
       - name: Create release archive
         run: |
+          cp run.sh dist/linux/
           tar czf vrpoker-stats-${{ github.ref_name }}-linux-wayland.tar.gz \
             -C dist/linux vrpoker-stats \
             run.sh

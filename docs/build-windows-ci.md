@@ -1,41 +1,44 @@
 # Windows Build in CI
 
-This project builds Windows release artifacts on GitHub Actions using a dedicated
-Windows job.
+This project uses Linux-first CI for day-to-day checks, and keeps a weekly native
+Windows verification workflow.
 
 ## Why this setup
 
 - The app uses Fyne and OpenGL bindings, which require CGO for desktop builds.
-- Building on `windows-latest` avoids fragile Linux-to-Windows CGO cross-toolchain setup in release CI.
-- Toolchain installation is explicit in workflow history.
+- Linux cross-builds are faster for regular PR/push feedback loops.
+- Weekly native Windows checks still validate a true Windows environment.
+- Toolchain installation remains explicit in workflow history.
 
 ## CI behavior
 
-- `pull_request` and `push` run:
+- `pull_request` and `push` run in `ci.yml`:
   - Linux verify job
   - Linux build job
-  - Windows build job
+  - Linux-hosted Windows cross-build job (`mingw-w64`)
 - Version tag push (`v*`) additionally runs release packaging and publishes:
   - `vrpoker-stats-<tag>-linux-wayland.tar.gz`
   - `vrpoker-stats-<tag>-windows-amd64.zip`
 
-## Windows job toolchain
+- Weekly `windows-native-weekly.yml` runs:
+  - Native Windows build on `windows-latest`
+  - Only when changes exist since the previous successful weekly run
 
-The workflow installs MinGW GCC via `msys2/setup-msys2` and builds with:
+## Linux cross-build toolchain
 
-```powershell
-$env:CGO_ENABLED = "1"
-$env:GOOS = "windows"
-$env:GOARCH = "amd64"
-$env:CC = "C:\msys64\mingw64\bin\gcc.exe"
-go build -o vrpoker-stats.exe .
+The regular CI workflow installs MinGW GCC via apt and builds with:
+
+```bash
+sudo apt-get install -y --no-install-recommends mingw-w64 gcc pkg-config
+CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -o vrpoker-stats.exe .
 ```
 
 ## Local reproduction on Linux
 
-Install MinGW and run:
+Install dependencies and run:
 
 ```bash
+mise run deps-linux
 mise run build-windows
 ```
 
@@ -48,6 +51,6 @@ CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc go build -o vr
 ## Troubleshooting
 
 - `x86_64-w64-mingw32-gcc not found`
-  - Install MinGW (`sudo apt-get install -y mingw-w64`) or ensure PATH is correct.
+  - Install MinGW (`mise run deps-linux` or `sudo apt-get install -y mingw-w64`) and ensure PATH is correct.
 - `build constraints exclude all Go files in .../go-gl/gl`
   - This usually indicates `CGO_ENABLED=0` or missing CGO compiler.
