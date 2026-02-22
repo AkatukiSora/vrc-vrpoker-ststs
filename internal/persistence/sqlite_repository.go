@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/parser"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type SQLiteRepository struct {
@@ -16,7 +16,7 @@ type SQLiteRepository struct {
 }
 
 func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
