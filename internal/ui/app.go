@@ -386,6 +386,12 @@ func (a *App) changeLogFile(path string) {
 		}
 		a.doUpdateStats()
 	}
+	w.OnNewLogFile = func(nextPath string) {
+		if !a.isCurrentWatcherGeneration(gen) {
+			return
+		}
+		a.requestLogFileChange(nextPath)
+	}
 	w.OnError = func(err error) {
 		if !a.isCurrentWatcherGeneration(gen) {
 			return

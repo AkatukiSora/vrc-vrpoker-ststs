@@ -16,14 +16,15 @@ import (
 
 // LogWatcher monitors VRChat log files for new content
 type LogWatcher struct {
-	LogPath   string
-	offset    int64
-	watcher   *fsnotify.Watcher
-	OnNewData func(lines []string, startOffset int64, endOffset int64)
-	OnError   func(err error)
-	done      chan struct{}
-	mu        sync.Mutex
-	stopOnce  sync.Once
+	LogPath      string
+	offset       int64
+	watcher      *fsnotify.Watcher
+	OnNewData    func(lines []string, startOffset int64, endOffset int64)
+	OnNewLogFile func(path string)
+	OnError      func(err error)
+	done         chan struct{}
+	mu           sync.Mutex
+	stopOnce     sync.Once
 }
 
 // NewLogWatcher creates a watcher for the given log file path
@@ -86,6 +87,11 @@ func (lw *LogWatcher) watchLoop() {
 		case event, ok := <-lw.watcher.Events:
 			if !ok {
 				return
+			}
+			if event.Has(fsnotify.Create) && isVRChatLogFile(event.Name) {
+				if filepath.Clean(event.Name) != filepath.Clean(lw.LogPath) && lw.OnNewLogFile != nil {
+					lw.OnNewLogFile(event.Name)
+				}
 			}
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
 				if filepath.Clean(event.Name) == filepath.Clean(lw.LogPath) {
@@ -264,4 +270,10 @@ func expandHome(path string) string {
 		return filepath.Join(home, path[2:])
 	}
 	return path
+}
+
+func isVRChatLogFile(path string) bool {
+	name := filepath.Base(path)
+	matched, err := filepath.Match("output_log_*.txt", name)
+	return err == nil && matched
 }
