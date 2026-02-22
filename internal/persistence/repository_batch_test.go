@@ -52,7 +52,7 @@ func TestSaveImportBatchParity(t *testing.T) {
 				ID:         1,
 				StartTime:  time.Date(2026, 2, 21, 0, 0, 0, 0, time.UTC),
 				EndTime:    time.Date(2026, 2, 21, 0, 0, 5, 0, time.UTC),
-				Players:    map[int]*parser.PlayerHandInfo{0: &parser.PlayerHandInfo{SeatID: 0}},
+				Players:    map[int]*parser.PlayerHandInfo{0: {SeatID: 0}},
 				IsComplete: true,
 			}
 			source := HandSourceRef{
