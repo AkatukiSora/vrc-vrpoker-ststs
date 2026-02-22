@@ -45,7 +45,7 @@ func suitColor(suit string) color.Color {
 
 // cardLabel returns a canvas.Text for a single Card using suit unicode and color.
 func cardLabel(c parser.Card, textSize float32) *canvas.Text {
-	text := canvas.NewText(c.Rank+suitSymbol(c.Suit), suitColor(c.Suit))
+	text := canvas.NewText(rankDisplayName(c.Rank)+suitSymbol(c.Suit), suitColor(c.Suit))
 	text.TextStyle = fyne.TextStyle{Bold: true}
 	text.TextSize = textSize
 	return text
@@ -198,7 +198,7 @@ func handSummaryLine1(h *parser.Hand, localSeat int) string {
 	if lp, ok := h.Players[seat]; ok && len(lp.HoleCards) == 2 {
 		c1 := lp.HoleCards[0]
 		c2 := lp.HoleCards[1]
-		holeStr = c1.Rank + suitSymbol(c1.Suit) + " " + c2.Rank + suitSymbol(c2.Suit)
+		holeStr = rankDisplayName(c1.Rank) + suitSymbol(c1.Suit) + " " + rankDisplayName(c2.Rank) + suitSymbol(c2.Suit)
 	} else {
 		holeStr = "??"
 	}
@@ -206,7 +206,7 @@ func handSummaryLine1(h *parser.Hand, localSeat int) string {
 	// Board
 	var boardParts []string
 	for _, c := range h.CommunityCards {
-		boardParts = append(boardParts, c.Rank+suitSymbol(c.Suit))
+		boardParts = append(boardParts, rankDisplayName(c.Rank)+suitSymbol(c.Suit))
 	}
 	boardStr := strings.Join(boardParts, " ")
 	if boardStr == "" {
@@ -259,12 +259,12 @@ func handSummaryEntryFields(h *parser.Hand, localSeat int) ([]string, []string) 
 	if lp, ok := h.Players[seat]; ok && len(lp.HoleCards) == 2 {
 		c1 := lp.HoleCards[0]
 		c2 := lp.HoleCards[1]
-		holeStr = c1.Rank + suitSymbol(c1.Suit) + " " + c2.Rank + suitSymbol(c2.Suit)
+		holeStr = rankDisplayName(c1.Rank) + suitSymbol(c1.Suit) + " " + rankDisplayName(c2.Rank) + suitSymbol(c2.Suit)
 	}
 
 	boardParts := make([]string, 0, len(h.CommunityCards))
 	for _, c := range h.CommunityCards {
-		boardParts = append(boardParts, c.Rank+suitSymbol(c.Suit))
+		boardParts = append(boardParts, rankDisplayName(c.Rank)+suitSymbol(c.Suit))
 	}
 	boardStr := strings.Join(boardParts, " ")
 	if boardStr == "" {
