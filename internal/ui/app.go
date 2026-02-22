@@ -104,7 +104,7 @@ func Run(service appService, metadata AppMetadata) {
 		win:          win,
 		service:      service,
 		rangeState:   &HandRangeViewState{},
-		historyState: &HandHistoryViewState{SelectedHandID: -1},
+		historyState: &HandHistoryViewState{},
 		metricState:  NewMetricVisibilityState(),
 		currentTab:   tabOverview,
 		metadata:     metadata,
