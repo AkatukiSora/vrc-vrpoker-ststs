@@ -24,11 +24,11 @@ description = "Cross-build Windows amd64 binary (requires MinGW)"
 run = '''
   if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
     echo "Error: x86_64-w64-mingw32-gcc not found"
-    echo "Install MinGW first, e.g. on Ubuntu: sudo apt-get install -y mingw-w64"
+    echo "Install MinGW first, e.g. on Ubuntu: sudo apt-get install -y gcc-mingw-w64-x86-64"
     exit 1
   fi
   CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
-    go build -o "${BINARY}.exe" .
+    go build -ldflags "-s -w" -o "${BINARY}.exe" .
 '''
 
 [tasks.deps-linux]
@@ -47,7 +47,7 @@ run = '''
     libgles2-mesa-dev \
     pkg-config \
     gcc \
-    mingw-w64 \
+    gcc-mingw-w64-x86-64 \
     zip
 '''
 
