@@ -121,6 +121,16 @@ If these files appear later, treat them as higher-priority local policy.
 - Fyne UI updates must run on main thread (`fyne.Do(...)`).
 - Ensure watcher replacement/shutdown does not leak goroutines.
 
+### UI Architecture Safety
+
+- Keep business rules out of `internal/ui`; place domain logic in parser/stats/application layers.
+- Keep a single source of truth for metric catalog definitions; do not duplicate labels/thresholds across packages.
+- Avoid mutable init-time side effects for registries; prefer explicit construction/registration paths.
+- Guard async UI operations with cancellation or generation checks so stale results cannot overwrite newer state.
+- Avoid deep container index traversal in Fyne trees; prefer typed widget references via struct fields.
+- Prefer update-in-place tab views over full container rebuilds.
+- Ensure watcher instances and background goroutines stop on app close/shutdown.
+
 ### Stats and Metric Logic
 
 - Prefer opportunity-based metrics (`count / opp`) over ad-hoc ratios.

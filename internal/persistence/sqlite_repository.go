@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/parser"
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type SQLiteRepository struct {
@@ -16,7 +16,7 @@ type SQLiteRepository struct {
 }
 
 func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -76,12 +76,18 @@ func (r *SQLiteRepository) UpsertHands(ctx context.Context, hands []PersistedHan
 	if err != nil {
 		return UpsertResult{}, err
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
+	res, err := r.upsertHandsTx(ctx, tx, hands)
+	if err != nil {
+		_ = tx.Rollback()
+		return UpsertResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return UpsertResult{}, err
+	}
+	return res, nil
+}
 
+func (r *SQLiteRepository) upsertHandsTx(ctx context.Context, tx *sql.Tx, hands []PersistedHand) (UpsertResult, error) {
 	stmt := `INSERT INTO hands(
 		hand_uid, source_path, start_byte, end_byte, start_line, end_line,
 		start_time, end_time, is_complete, local_seat, payload_json, updated_at
@@ -110,12 +116,15 @@ func (r *SQLiteRepository) UpsertHands(ctx context.Context, hands []PersistedHan
 		if uid == "" {
 			uid = GenerateHandUID(ph.Hand, ph.Source)
 		}
-		payload, mErr := json.Marshal(ph.Hand)
-		if mErr != nil {
-			err = mErr
+		exists, err := rowExists(ctx, tx, `SELECT 1 FROM hands WHERE hand_uid = ? LIMIT 1`, uid)
+		if err != nil {
 			return UpsertResult{}, err
 		}
-		_, eErr := tx.ExecContext(
+		payload, err := json.Marshal(ph.Hand)
+		if err != nil {
+			return UpsertResult{}, err
+		}
+		if _, err := tx.ExecContext(
 			ctx,
 			stmt,
 			uid,
@@ -130,16 +139,14 @@ func (r *SQLiteRepository) UpsertHands(ctx context.Context, hands []PersistedHan
 			ph.Hand.LocalPlayerSeat,
 			payload,
 			now,
-		)
-		if eErr != nil {
-			err = eErr
+		); err != nil {
 			return UpsertResult{}, err
 		}
-		res.Inserted++
-	}
-
-	if err = tx.Commit(); err != nil {
-		return UpsertResult{}, err
+		if exists {
+			res.Updated++
+		} else {
+			res.Inserted++
+		}
 	}
 	return res, nil
 }
@@ -191,11 +198,33 @@ func (r *SQLiteRepository) ListHands(ctx context.Context, f HandFilter) ([]*pars
 }
 
 func (r *SQLiteRepository) CountHands(ctx context.Context, f HandFilter) (int, error) {
-	hands, err := r.ListHands(ctx, f)
-	if err != nil {
+	if f.LocalSeat != nil {
+		hands, err := r.ListHands(ctx, f)
+		if err != nil {
+			return 0, err
+		}
+		return len(hands), nil
+	}
+
+	query := `SELECT COUNT(*) FROM hands WHERE 1=1`
+	args := make([]any, 0, 3)
+	if f.OnlyComplete {
+		query += ` AND is_complete=1`
+	}
+	if f.FromTime != nil {
+		query += ` AND start_time >= ?`
+		args = append(args, f.FromTime.UTC().Format(time.RFC3339Nano))
+	}
+	if f.ToTime != nil {
+		query += ` AND start_time <= ?`
+		args = append(args, f.ToTime.UTC().Format(time.RFC3339Nano))
+	}
+
+	var count int
+	if err := r.db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
 		return 0, err
 	}
-	return len(hands), nil
+	return count, nil
 }
 
 func (r *SQLiteRepository) GetCursor(ctx context.Context, sourcePath string) (*ImportCursor, error) {
@@ -232,6 +261,39 @@ func (r *SQLiteRepository) GetCursor(ctx context.Context, sourcePath string) (*I
 }
 
 func (r *SQLiteRepository) SaveCursor(ctx context.Context, c ImportCursor) error {
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return err
+	}
+	if err := saveCursorTx(ctx, tx, c); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func (r *SQLiteRepository) SaveImportBatch(ctx context.Context, hands []PersistedHand, c ImportCursor) (UpsertResult, error) {
+	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return UpsertResult{}, err
+	}
+
+	res, err := r.upsertHandsTx(ctx, tx, hands)
+	if err != nil {
+		_ = tx.Rollback()
+		return UpsertResult{}, err
+	}
+	if err := saveCursorTx(ctx, tx, c); err != nil {
+		_ = tx.Rollback()
+		return UpsertResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return UpsertResult{}, err
+	}
+	return res, nil
+}
+
+func saveCursorTx(ctx context.Context, tx *sql.Tx, c ImportCursor) error {
 	updatedAt := c.UpdatedAt
 	if updatedAt.IsZero() {
 		updatedAt = time.Now()
@@ -250,7 +312,7 @@ func (r *SQLiteRepository) SaveCursor(ctx context.Context, c ImportCursor) error
 		last_hand_uid=excluded.last_hand_uid,
 		parser_state_json=excluded.parser_state_json,
 		updated_at=excluded.updated_at`
-	_, err := r.db.ExecContext(
+	_, err := tx.ExecContext(
 		ctx,
 		q,
 		c.SourcePath,
@@ -262,6 +324,18 @@ func (r *SQLiteRepository) SaveCursor(ctx context.Context, c ImportCursor) error
 		updatedAt.UTC().Format(time.RFC3339Nano),
 	)
 	return err
+}
+
+func rowExists(ctx context.Context, tx *sql.Tx, query string, args ...any) (bool, error) {
+	var probe int
+	err := tx.QueryRowContext(ctx, query, args...).Scan(&probe)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func boolToInt(v bool) int {

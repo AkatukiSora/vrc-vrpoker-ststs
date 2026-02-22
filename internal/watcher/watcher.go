@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -21,6 +22,8 @@ type LogWatcher struct {
 	OnNewData func(lines []string, startOffset int64, endOffset int64)
 	OnError   func(err error)
 	done      chan struct{}
+	mu        sync.Mutex
+	stopOnce  sync.Once
 }
 
 // NewLogWatcher creates a watcher for the given log file path
@@ -59,12 +62,16 @@ func (lw *LogWatcher) Start() error {
 
 // Stop stops the watcher
 func (lw *LogWatcher) Stop() {
-	close(lw.done)
-	lw.watcher.Close()
+	lw.stopOnce.Do(func() {
+		close(lw.done)
+		_ = lw.watcher.Close()
+	})
 }
 
 // SetOffset sets the initial read offset (for resuming)
 func (lw *LogWatcher) SetOffset(offset int64) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
 	lw.offset = offset
 }
 
@@ -116,12 +123,18 @@ func (lw *LogWatcher) readNewContent() error {
 		return err
 	}
 
+	lw.mu.Lock()
+	if info.Size() < lw.offset {
+		lw.offset = 0
+	}
 	if info.Size() <= lw.offset {
+		lw.mu.Unlock()
 		return nil // No new content
 	}
 	startOffset := lw.offset
+	lw.mu.Unlock()
 
-	if _, err := f.Seek(lw.offset, io.SeekStart); err != nil {
+	if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
 		return err
 	}
 
@@ -130,7 +143,10 @@ func (lw *LogWatcher) readNewContent() error {
 		return err
 	}
 
-	lw.offset = info.Size()
+	endOffset := info.Size()
+	lw.mu.Lock()
+	lw.offset = endOffset
+	lw.mu.Unlock()
 
 	if len(buf) == 0 {
 		return nil
@@ -146,7 +162,7 @@ func (lw *LogWatcher) readNewContent() error {
 	}
 
 	if len(lines) > 0 && lw.OnNewData != nil {
-		lw.OnNewData(lines, startOffset, lw.offset)
+		lw.OnNewData(lines, startOffset, endOffset)
 	}
 
 	return nil

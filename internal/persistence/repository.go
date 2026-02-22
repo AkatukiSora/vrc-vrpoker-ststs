@@ -63,6 +63,11 @@ type ImportRepository interface {
 	CursorRepository
 }
 
+type ImportBatchRepository interface {
+	ImportRepository
+	SaveImportBatch(ctx context.Context, hands []PersistedHand, cursor ImportCursor) (UpsertResult, error)
+}
+
 func GenerateHandUID(h *parser.Hand, src HandSourceRef) string {
 	payload := fmt.Sprintf(
 		"%s|%d|%d|%d|%d|%d|%d|%s",

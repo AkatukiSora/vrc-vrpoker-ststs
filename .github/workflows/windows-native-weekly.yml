@@ -1,0 +1,119 @@
+name: Windows Native Weekly
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  detect-changes:
+    name: Detect Changes Since Last Weekly Success
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.diff.outputs.should_run }}
+      previous_sha: ${{ steps.last-success.outputs.previous_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve last successful schedule run
+        id: last-success
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const workflow_id = "windows-native-weekly.yml";
+            const branch = context.payload.repository.default_branch;
+
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              owner,
+              repo,
+              workflow_id,
+              status: "completed",
+              conclusion: "success",
+              event: "schedule",
+              branch,
+              per_page: 100,
+            });
+
+            const currentRunId = context.runId;
+            const previous = runs.find((run) => run.id !== currentRunId);
+            const previousSha = previous ? previous.head_sha : "";
+
+            core.info(`previous successful schedule SHA: ${previousSha || "(none)"}`);
+            core.setOutput("previous_sha", previousSha);
+
+      - name: Compute diff range
+        id: diff
+        env:
+          PREVIOUS_SHA: ${{ steps.last-success.outputs.previous_sha }}
+        run: |
+          if [ -z "$PREVIOUS_SHA" ]; then
+            echo "No previous successful scheduled run found; run native build."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git cat-file -e "$PREVIOUS_SHA^{commit}" 2>/dev/null; then
+            echo "Previous SHA is unavailable locally; run native build."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git diff --quiet "$PREVIOUS_SHA..$GITHUB_SHA"; then
+            echo "No changes since last successful scheduled run; skip native build."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Changes detected since last successful scheduled run; run native build."
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  windows-native-build:
+    name: Build (Windows Native)
+    runs-on: windows-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.should_run == 'true'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install MinGW toolchain (CGO for Windows)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+
+      - name: Build Windows binary
+        shell: pwsh
+        run: |
+          $env:CGO_ENABLED = "1"
+          $env:GOOS = "windows"
+          $env:GOARCH = "amd64"
+          $env:CC = "C:\msys64\mingw64\bin\gcc.exe"
+          go build -o vrpoker-stats.exe .
+
+      - name: Upload weekly artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vrpoker-stats-windows-amd64-native-weekly
+          path: vrpoker-stats.exe
+          retention-days: 7
+
+  windows-native-skip:
+    name: Native Check Skipped
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.should_run != 'true'
+    steps:
+      - name: Report skip reason
+        run: |
+          echo "No repository changes since the last successful weekly native run."
+          echo "Skipping windows-native-build."

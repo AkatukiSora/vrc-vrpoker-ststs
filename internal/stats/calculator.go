@@ -481,11 +481,6 @@ func (m *metricAccumulator) consumeHand(h *parser.Hand, pi *parser.PlayerHandInf
 		m.incCount(MetricRFI)
 	}
 
-	m.incOpp(MetricColdCall)
-	if isColdCallApprox(pi, h) {
-		m.incCount(MetricColdCall)
-	}
-
 	m.incOpp(MetricWonWithoutSD)
 	if pi.Won && !pi.ShowedDown {
 		m.incCount(MetricWonWithoutSD)
@@ -503,6 +498,20 @@ func (m *metricAccumulator) consumeHand(h *parser.Hand, pi *parser.PlayerHandInf
 	}
 	if pi.ThreeBet {
 		m.incCount(MetricThreeBet)
+	}
+
+	if hasFourBetOpportunityApprox(pi, h) {
+		m.incOpp(MetricFourBet)
+	}
+	if didFourBetApprox(pi, h) {
+		m.incCount(MetricFourBet)
+	}
+
+	if hasSqueezeOpportunityApprox(pi, h) {
+		m.incOpp(MetricSqueeze)
+	}
+	if didSqueezeApprox(pi, h) {
+		m.incCount(MetricSqueeze)
 	}
 
 	if hasFoldToThreeBetOpportunityApprox(pi, h) {
@@ -525,6 +534,25 @@ func (m *metricAccumulator) consumeHand(h *parser.Hand, pi *parser.PlayerHandInf
 			m.incCount(MetricFoldToSteal)
 		}
 	}
+	if isFoldToStealOpportunityByPosition(pi, h, parser.PosBB) {
+		m.incOpp(MetricFoldBBToSteal)
+		if pi.FoldedPF {
+			m.incCount(MetricFoldBBToSteal)
+		}
+	}
+	if isFoldToStealOpportunityByPosition(pi, h, parser.PosSB) {
+		m.incOpp(MetricFoldSBToSteal)
+		if pi.FoldedPF {
+			m.incCount(MetricFoldSBToSteal)
+		}
+	}
+
+	if isThreeBetVsStealOpportunity(pi, h) {
+		m.incOpp(MetricThreeBetVsSteal)
+		if didThreeBetVsSteal(pi, h) {
+			m.incCount(MetricThreeBetVsSteal)
+		}
+	}
 
 	sawFlop := sawFlop(pi, h)
 	if sawFlop {
@@ -541,16 +569,13 @@ func (m *metricAccumulator) consumeHand(h *parser.Hand, pi *parser.PlayerHandInf
 
 	if pi.ShowedDown {
 		m.incOpp(MetricWSD)
-		m.incOpp(MetricWonAtSD)
 		if pi.Won {
 			m.incCount(MetricWSD)
-			m.incCount(MetricWonAtSD)
 		}
 	}
 
 	flopAgg := hasAggressionOnStreet(pi, parser.StreetFlop)
 	turnAgg := hasAggressionOnStreet(pi, parser.StreetTurn)
-	riverAgg := hasAggressionOnStreet(pi, parser.StreetRiver)
 
 	if pi.PFR && len(h.CommunityCards) >= 3 {
 		m.incOpp(MetricFlopCBet)
@@ -563,13 +588,6 @@ func (m *metricAccumulator) consumeHand(h *parser.Hand, pi *parser.PlayerHandInf
 		m.incOpp(MetricTurnCBet)
 		if turnAgg {
 			m.incCount(MetricTurnCBet)
-		}
-	}
-
-	if pi.PFR && len(h.CommunityCards) >= 5 && flopAgg && turnAgg {
-		m.incOpp(MetricRiverCBet)
-		if riverAgg {
-			m.incCount(MetricRiverCBet)
 		}
 	}
 
@@ -592,20 +610,6 @@ func (m *metricAccumulator) consumeHand(h *parser.Hand, pi *parser.PlayerHandInf
 			m.incCount(MetricFoldToTurnCBet)
 		}
 	}
-	if !pi.PFR && len(h.CommunityCards) >= 5 && hasOpponentAggressionOnStreet(h, pi.SeatID, parser.StreetRiver) && actedOnStreet(pi, parser.StreetRiver) {
-		m.incOpp(MetricFoldToRiverCBet)
-		if hasFoldOnStreet(pi, parser.StreetRiver) {
-			m.incCount(MetricFoldToRiverCBet)
-		}
-	}
-
-	if hasCheckRaiseApprox(pi) {
-		m.incOpp(MetricCheckRaise)
-		m.incCount(MetricCheckRaise)
-	} else if participatedPostFlop(pi) {
-		m.incOpp(MetricCheckRaise)
-	}
-
 	agg, call, fold := postFlopActionCounts(pi)
 	m.aggPostflop += agg
 	m.callPostflop += call
@@ -844,6 +848,99 @@ func isStealAttempt(pi *parser.PlayerHandInfo) bool {
 }
 
 func isFoldToStealOpportunity(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
+	if pi == nil {
+		return false
+	}
+	if pi.Position != parser.PosSB && pi.Position != parser.PosBB {
+		return false
+	}
+	return isFoldToStealOpportunityByPosition(pi, h, pi.Position)
+}
+
+func isFoldToStealOpportunityByPosition(pi *parser.PlayerHandInfo, h *parser.Hand, pos parser.Position) bool {
+	if pi == nil || h == nil {
+		return false
+	}
+	if pi.Position != pos {
+		return false
+	}
+	openSeat, ok := detectStealOpenSeat(h)
+	if !ok || openSeat == pi.SeatID {
+		return false
+	}
+	seq := preflopActionSequence(h)
+	seenOpen := false
+	for _, sa := range seq {
+		if sa.seat == openSeat && isAggressivePreflop(sa.act.Action) {
+			seenOpen = true
+			continue
+		}
+		if !seenOpen {
+			continue
+		}
+		if sa.seat == pi.SeatID {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFourBetOpportunityApprox(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
+	return hasFoldToThreeBetOpportunityApprox(pi, h)
+}
+
+func didFourBetApprox(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
+	if !hasFourBetOpportunityApprox(pi, h) {
+		return false
+	}
+	level, ok := firstPreflopAggressionLevel(h, pi.SeatID)
+	return ok && level >= 3
+}
+
+func hasSqueezeOpportunityApprox(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
+	if pi == nil || h == nil {
+		return false
+	}
+	seq := preflopActionSequence(h)
+	openSeen := false
+	openCalls := 0
+	raiseCount := 0
+	for _, sa := range seq {
+		if sa.seat == pi.SeatID {
+			return openSeen && openCalls > 0 && raiseCount == 1
+		}
+		if isAggressivePreflop(sa.act.Action) {
+			raiseCount++
+			if raiseCount == 1 {
+				openSeen = true
+				continue
+			}
+			return false
+		}
+		if openSeen && sa.act.Action == parser.ActionCall {
+			openCalls++
+		}
+	}
+	return false
+}
+
+func didSqueezeApprox(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
+	if !hasSqueezeOpportunityApprox(pi, h) {
+		return false
+	}
+	for _, a := range pi.Actions {
+		if a.Street != parser.StreetPreFlop {
+			continue
+		}
+		if a.Action == parser.ActionBlindSB || a.Action == parser.ActionBlindBB {
+			continue
+		}
+		return isAggressivePreflop(a.Action)
+	}
+	return false
+}
+
+func isThreeBetVsStealOpportunity(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
 	if pi == nil || h == nil {
 		return false
 	}
@@ -867,8 +964,56 @@ func isFoldToStealOpportunity(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
 		if sa.seat == pi.SeatID {
 			return true
 		}
+		if isAggressivePreflop(sa.act.Action) {
+			return false
+		}
 	}
 	return false
+}
+
+func didThreeBetVsSteal(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
+	if !isThreeBetVsStealOpportunity(pi, h) {
+		return false
+	}
+	seq := preflopActionSequence(h)
+	openSeat, ok := detectStealOpenSeat(h)
+	if !ok {
+		return false
+	}
+	seenOpen := false
+	for _, sa := range seq {
+		if sa.seat == openSeat && isAggressivePreflop(sa.act.Action) {
+			seenOpen = true
+			continue
+		}
+		if !seenOpen {
+			continue
+		}
+		if sa.seat == pi.SeatID {
+			return isAggressivePreflop(sa.act.Action)
+		}
+		if isAggressivePreflop(sa.act.Action) {
+			return false
+		}
+	}
+	return false
+}
+
+func firstPreflopAggressionLevel(h *parser.Hand, seat int) (int, bool) {
+	if h == nil {
+		return 0, false
+	}
+	level := 0
+	for _, sa := range preflopActionSequence(h) {
+		if !isAggressivePreflop(sa.act.Action) {
+			continue
+		}
+		if sa.seat == seat {
+			return level + 1, true
+		}
+		level++
+	}
+	return 0, false
 }
 
 func isColdCallApprox(pi *parser.PlayerHandInfo, h *parser.Hand) bool {
