@@ -22,6 +22,7 @@ type MetricDefinition struct {
 	HelpKey        string
 	HelpFallback   string
 	MinSamples     int
+	GoodSamples    int
 	ShowInOverview bool
 	ShowInPosition bool
 	StatsMetricID  *stats.MetricID
@@ -123,19 +124,38 @@ func metricFootnoteText(opportunities, minSamples int) string {
 	return lang.X("metric.footnote.normal", "n={{.N}}", map[string]any{"N": opportunities})
 }
 
+type sampleThreshold struct {
+	Min  int
+	Good int
+}
+
+func thresholdForMetricID(id string) sampleThreshold {
+	th := metricThresholdForMetricID(id)
+	return sampleThreshold{Min: th.Min, Good: th.Good}
+}
+
 func metricPresets() []MetricPreset {
 	beginner := setOf(
-		"hands", "winRate", "vpip", "pfr", "gap", "rfi", "three_bet", "fold_to_three_bet",
-		"steal", "fold_to_steal", "flop_cbet", "fold_to_flop_cbet", "wtsd", "w_sd", "wwsf", "profit",
+		"hands", "profit",
+		"vpip", "pfr", "gap", "rfi", "steal",
+		"three_bet", "fold_to_three_bet", "fold_bb_to_steal", "fold_sb_to_steal",
+		"flop_cbet", "turn_cbet", "fold_to_flop_cbet", "fold_to_turn_cbet",
+		"wtsd", "w_sd", "wwsf",
 	)
 	advanced := setOf(
-		"hands", "winRate", "vpip", "pfr", "gap", "rfi", "cold_call", "three_bet", "fold_to_three_bet",
-		"flop_cbet", "turn_cbet", "river_cbet", "delayed_cbet", "fold_to_flop_cbet", "fold_to_turn_cbet", "fold_to_river_cbet",
-		"afq", "af", "check_raise", "wtsd", "w_sd", "wwsf", "won_without_showdown", "won_at_showdown", "bb_per_100", "profit",
+		"hands", "profit", "bb_per_100",
+		"vpip", "pfr", "gap", "rfi", "steal",
+		"three_bet", "three_bet_vs_steal", "fold_to_three_bet", "four_bet", "squeeze",
+		"fold_to_steal", "fold_bb_to_steal", "fold_sb_to_steal",
+		"flop_cbet", "turn_cbet", "delayed_cbet", "fold_to_flop_cbet", "fold_to_turn_cbet",
+		"wtsd", "w_sd", "wwsf", "afq", "af", "won_without_showdown",
 	)
 	leak := setOf(
-		"vpip", "pfr", "gap", "cold_call", "three_bet", "fold_to_three_bet", "steal", "fold_to_steal",
-		"flop_cbet", "turn_cbet", "fold_to_flop_cbet", "fold_to_turn_cbet", "wtsd", "w_sd", "wwsf", "afq",
+		"vpip", "pfr", "gap", "rfi", "steal",
+		"three_bet", "three_bet_vs_steal", "fold_to_three_bet", "four_bet", "squeeze",
+		"fold_bb_to_steal", "fold_sb_to_steal", "fold_to_steal",
+		"flop_cbet", "turn_cbet", "fold_to_flop_cbet", "fold_to_turn_cbet",
+		"wtsd", "w_sd", "wwsf", "afq", "won_without_showdown", "bb_per_100",
 	)
 	all := setOf()
 	for _, m := range metricRegistry {
@@ -155,16 +175,6 @@ func setOf(ids ...string) map[string]struct{} {
 		out[id] = struct{}{}
 	}
 	return out
-}
-
-func colorForWinRate(rate float64) color.Color {
-	if rate > 50 {
-		return color.NRGBA{R: 0x4c, G: 0xaf, B: 0x50, A: 0xff}
-	}
-	if rate < 40 {
-		return color.NRGBA{R: 0xf4, G: 0x43, B: 0x36, A: 0xff}
-	}
-	return theme.ForegroundColor()
 }
 
 func colorForVPIP(rate float64) color.Color {
@@ -208,43 +218,185 @@ func statsMetricValue(s *stats.Stats, id stats.MetricID) MetricValue {
 }
 
 type trendInsight struct {
-	Level string
-	Text  string
+	Priority  string
+	Severity  string
+	Title     string
+	Text      string
+	Evidence  []string
+	LowSample bool
+}
+
+func insightSeverityLabel(code string) string {
+	switch code {
+	case "P0":
+		return lang.X("insight.severity.high", "High")
+	case "P1":
+		return lang.X("insight.severity.medium", "Medium")
+	default:
+		return lang.X("insight.severity.low", "Low")
+	}
+}
+
+func insightMetricDisplay(s *stats.Stats, id stats.MetricID) (string, int, bool) {
+	m, ok := s.Metric(id)
+	if !ok {
+		return "", 0, false
+	}
+	if m.Format == stats.MetricFormatRatio || m.Format == stats.MetricFormatBBPer100 {
+		return fmt.Sprintf("%.2f", m.Rate), m.Opportunity, true
+	}
+	return fmt.Sprintf("%.1f%%", m.Rate), m.Opportunity, true
+}
+
+func insightEvidenceLine(s *stats.Stats, id stats.MetricID, label, normal, reason string) string {
+	v, n, ok := insightMetricDisplay(s, id)
+	if !ok {
+		return ""
+	}
+	return lang.X("insight.evidence.line", "{{.Label}} {{.Value}} (n={{.N}}) | Typical: {{.Normal}} | {{.Reason}}", map[string]any{
+		"Label":  label,
+		"Value":  v,
+		"N":      n,
+		"Normal": normal,
+		"Reason": reason,
+	})
 }
 
 func buildTrendInsights(s *stats.Stats) []trendInsight {
 	if s == nil || s.Metrics == nil {
 		return nil
 	}
-	out := make([]trendInsight, 0, 6)
+	out := make([]trendInsight, 0, 8)
+	add := func(priority, titleKey, titleFallback, textKey, textFallback string, lowSample bool, evidence []string) {
+		cleanEvidence := make([]string, 0, len(evidence))
+		for _, e := range evidence {
+			if e == "" {
+				continue
+			}
+			cleanEvidence = append(cleanEvidence, e)
+		}
+		out = append(out, trendInsight{
+			Priority:  priority,
+			Severity:  insightSeverityLabel(priority),
+			Title:     lang.X(titleKey, titleFallback),
+			Text:      lang.X(textKey, textFallback),
+			Evidence:  cleanEvidence,
+			LowSample: lowSample,
+		})
+	}
+	lowBy := func(metricID stats.MetricID) bool {
+		m, ok := s.Metric(metricID)
+		if !ok {
+			return true
+		}
+		return m.Opportunity < thresholdForMetricID(string(metricID)).Min
+	}
 	vpip, okV := s.Metric(stats.MetricVPIP)
 	pfr, okP := s.Metric(stats.MetricPFR)
-	if okV && okP && vpip.Opportunity >= 200 {
-		if vpip.Rate-pfr.Rate >= 12 {
-			out = append(out, trendInsight{Level: "warn", Text: lang.X("insight.vpip_pfr_gap", "VPIP-PFR gap is large. You may be entering pots passively too often.")})
-		}
+	if okV && okP && vpip.Rate-pfr.Rate >= 11 {
+		add("P0", "insight.passive_entry.title", "Passive preflop entries", "insight.passive_entry.text", "You may be entering too many pots by call. Consider shifting to a raise-first plan in open spots.", lowBy(stats.MetricVPIP) || lowBy(stats.MetricPFR), []string{
+			insightEvidenceLine(s, stats.MetricVPIP, "VPIP", "18-28%", lang.X("insight.reason.vpip_high", "Participation is wider than standard ranges.")),
+			insightEvidenceLine(s, stats.MetricPFR, "PFR", "12-22%", lang.X("insight.reason.pfr_low", "Raise frequency is not keeping up with VPIP.")),
+			insightEvidenceLine(s, stats.MetricGap, "Gap", "0-10", lang.X("insight.reason.gap_high", "Large VPIP-PFR gap suggests passive calls.")),
+		})
 	}
-	foldSteal, okFS := s.Metric(stats.MetricFoldToSteal)
-	if okFS && foldSteal.Opportunity >= 50 && foldSteal.Rate >= 70 {
-		out = append(out, trendInsight{Level: "action", Text: lang.X("insight.fold_to_steal", "Fold to Steal is high. Review blind defense ranges and 3-bet/call mixes.")})
+
+	threeBet, ok3b := s.Metric(stats.MetricThreeBet)
+	foldTo3Bet, okF3 := s.Metric(stats.MetricFoldToThreeBet)
+	if ok3b && threeBet.Rate <= 3.5 {
+		add("P0", "insight.preflop_exploit.title", "Preflop exploit risk", "insight.preflop_exploit.text", "Low 3-bet frequency can let opponents open too wide against you.", lowBy(stats.MetricThreeBet), []string{
+			insightEvidenceLine(s, stats.MetricThreeBet, "3Bet", "4-9%", lang.X("insight.reason.threebet_low", "Too few re-raises allow wider opens.")),
+			insightEvidenceLine(s, stats.MetricThreeBetVsSteal, "3Bet vs Steal", "5-12%", lang.X("insight.reason.threebet_vs_steal_low", "Blind counter-pressure versus steals is limited.")),
+		})
 	}
+	if okF3 && foldTo3Bet.Rate >= 70 {
+		add("P0", "insight.fold_to_3bet.title", "Open is too vulnerable to 3-bets", "insight.fold_to_3bet.text", "You fold too often versus 3-bets after opening. Opponents may 3-bet you aggressively.", lowBy(stats.MetricFoldToThreeBet), []string{
+			insightEvidenceLine(s, stats.MetricFoldToThreeBet, "Fold to 3Bet", "40-55%", lang.X("insight.reason.fold_to_3bet_high", "This fold rate is high enough to invite aggressive 3-bets.")),
+			insightEvidenceLine(s, stats.MetricFourBet, "4Bet", "1-3%", lang.X("insight.reason.fourbet_low", "Low 4-bet frequency gives fewer counter options.")),
+		})
+	}
+
+	foldBBSteal, okFBB := s.Metric(stats.MetricFoldBBToSteal)
+	foldSBSteal, okFSB := s.Metric(stats.MetricFoldSBToSteal)
+	if (okFBB && foldBBSteal.Rate >= 65) || (okFSB && foldSBSteal.Rate >= 70) {
+		add("P0", "insight.overfold_blinds.title", "Overfolding in blinds", "insight.overfold_blinds.text", "You may be folding too much versus steals, which is easy to exploit over many hands.", (okFBB && lowBy(stats.MetricFoldBBToSteal)) || (okFSB && lowBy(stats.MetricFoldSBToSteal)), []string{
+			insightEvidenceLine(s, stats.MetricFoldBBToSteal, "Fold BB to Steal", "40-55%", lang.X("insight.reason.fold_bb_high", "Big blind defense is below a typical defend mix.")),
+			insightEvidenceLine(s, stats.MetricFoldSBToSteal, "Fold SB to Steal", "45-60%", lang.X("insight.reason.fold_sb_high", "Small blind folds are high versus steals.")),
+		})
+	}
+	if (okFBB && foldBBSteal.Rate <= 35) || (okFSB && foldSBSteal.Rate <= 35) {
+		add("P1", "insight.overdefend_blinds.title", "Over-defending blinds", "insight.overdefend_blinds.text", "You may be defending too wide out of position, leading to difficult postflop spots.", (okFBB && lowBy(stats.MetricFoldBBToSteal)) || (okFSB && lowBy(stats.MetricFoldSBToSteal)), []string{
+			insightEvidenceLine(s, stats.MetricFoldBBToSteal, "Fold BB to Steal", "40-55%", lang.X("insight.reason.fold_bb_low", "Very low fold rate can over-expand OOP defense.")),
+			insightEvidenceLine(s, stats.MetricFoldSBToSteal, "Fold SB to Steal", "45-60%", lang.X("insight.reason.fold_sb_low", "Very low fold rate can over-expand OOP defense.")),
+			insightEvidenceLine(s, stats.MetricWTSD, "WTSD", "22-30%", lang.X("insight.reason.wtsd_support", "Showdown tendency helps confirm over-calling risk.")),
+		})
+	}
+
+	rfi, okRFI := s.Metric(stats.MetricRFI)
+	steal, okSteal := s.Metric(stats.MetricSteal)
+	if (okRFI && rfi.Rate <= 16) || (okSteal && steal.Rate <= 28) {
+		add("P1", "insight.missed_steal.title", "Missed steal/value opportunities", "insight.missed_steal.text", "Late-position opens may be too tight. You could be leaving uncontested pots on the table.", (okRFI && lowBy(stats.MetricRFI)) || (okSteal && lowBy(stats.MetricSteal)), []string{
+			insightEvidenceLine(s, stats.MetricRFI, "RFI", "15-25% (MP), 25-55% (CO/BTN)", lang.X("insight.reason.rfi_low", "Open frequency is conservative for steal-heavy positions.")),
+			insightEvidenceLine(s, stats.MetricSteal, "Steal Attempt", "30-50%", lang.X("insight.reason.steal_low", "Steal spots are not converted often enough.")),
+		})
+	}
+
+	foldFlopCBet, okFFC := s.Metric(stats.MetricFoldToFlopCBet)
+	foldTurnCBet, okFTC := s.Metric(stats.MetricFoldToTurnCBet)
+	if okFFC && foldFlopCBet.Rate >= 60 {
+		add("P0", "insight.overfold_flop.title", "Overfolding vs flop c-bets", "insight.overfold_flop.text", "Opponents may profit by c-betting very wide because you fold too frequently on the flop.", lowBy(stats.MetricFoldToFlopCBet), []string{
+			insightEvidenceLine(s, stats.MetricFoldToFlopCBet, "Fold to Flop CBet", "35-50%", lang.X("insight.reason.fold_flop_high", "Flop folds are above a defend-balanced range.")),
+			insightEvidenceLine(s, stats.MetricWWSF, "WWSF", "42-48%", lang.X("insight.reason.wwsf_low", "Low flop-win frequency supports an overfold pattern.")),
+		})
+	}
+	if okFTC && foldTurnCBet.Rate >= 65 {
+		add("P1", "insight.overfold_turn.title", "Overfolding vs turn barrels", "insight.overfold_turn.text", "You may be giving up too often on turn pressure after defending flop.", lowBy(stats.MetricFoldToTurnCBet), []string{
+			insightEvidenceLine(s, stats.MetricFoldToFlopCBet, "Fold to Flop CBet", "35-50%", lang.X("insight.reason.fold_flop_normal_turn_high", "Flop defense is acceptable but turn folds spike.")),
+			insightEvidenceLine(s, stats.MetricFoldToTurnCBet, "Fold to Turn CBet", "40-55%", lang.X("insight.reason.fold_turn_high", "Turn folds are high versus typical pressure handling.")),
+		})
+	}
+
 	flopCbet, okFC := s.Metric(stats.MetricFlopCBet)
 	turnCbet, okTC := s.Metric(stats.MetricTurnCBet)
 	wwsf, okWW := s.Metric(stats.MetricWWSF)
-	if okFC && okTC && okWW && flopCbet.Opportunity >= 50 && turnCbet.Opportunity >= 50 {
-		if flopCbet.Rate >= 65 && turnCbet.Rate <= 35 && wwsf.Rate < 42 {
-			out = append(out, trendInsight{Level: "warn", Text: lang.X("insight.over_cbet", "High flop c-bet but low turn follow-through. You may be over-cbetting flop then giving up.")})
-		}
+	if okFC && okTC && okWW && flopCbet.Rate >= 75 && turnCbet.Rate <= 30 {
+		add("P1", "insight.auto_cbet.title", "Auto c-bet tendency", "insight.auto_cbet.text", "High flop c-bet with low turn follow-through may indicate one-and-done aggression.", lowBy(stats.MetricFlopCBet) || lowBy(stats.MetricTurnCBet) || lowBy(stats.MetricWWSF), []string{
+			insightEvidenceLine(s, stats.MetricFlopCBet, "Flop CBet", "50-70%", lang.X("insight.reason.flop_cbet_high", "Flop c-bet rate is above standard continuation ranges.")),
+			insightEvidenceLine(s, stats.MetricTurnCBet, "Turn CBet", "30-55%", lang.X("insight.reason.turn_cbet_low", "Turn follow-through is low after flop aggression.")),
+			insightEvidenceLine(s, stats.MetricWWSF, "WWSF", "42-48%", lang.X("insight.reason.wwsf_support", "Low capture rate supports one-and-done concern.")),
+		})
 	}
+
 	wtsd, okWT := s.Metric(stats.MetricWTSD)
 	wsd, okWSD := s.Metric(stats.MetricWSD)
-	if okWT && okWSD && wtsd.Opportunity >= 50 && wsd.Opportunity >= 50 {
-		if wtsd.Rate >= 33 && wsd.Rate <= 45 {
-			out = append(out, trendInsight{Level: "action", Text: lang.X("insight.thin_calls", "High WTSD with low W$SD suggests thin calls. Tighten showdown-bound bluff-catching.")})
-		}
-		if wtsd.Rate <= 20 && wwsf.Rate < 42 {
-			out = append(out, trendInsight{Level: "info", Text: lang.X("insight.over_folding", "Low WTSD and low WWSF can indicate over-folding on later streets.")})
-		}
+	if okWT && okWSD && wtsd.Rate >= 32 && wsd.Rate <= 45 {
+		add("P0", "insight.overcall_sd.title", "Over-calling to showdown", "insight.overcall_sd.text", "High WTSD with low W$SD often means too many thin calls in marginal bluff-catch spots.", lowBy(stats.MetricWTSD) || lowBy(stats.MetricWSD), []string{
+			insightEvidenceLine(s, stats.MetricWTSD, "WTSD", "22-30%", lang.X("insight.reason.wtsd_high", "Showdown frequency is high for a balanced line.")),
+			insightEvidenceLine(s, stats.MetricWSD, "W$SD", "47-55%", lang.X("insight.reason.wsd_low", "Lower showdown win rate suggests thin calls.")),
+		})
+	}
+	if okWT && okWW && wtsd.Rate <= 20 && wwsf.Rate < 42 {
+		add("P1", "insight.underreach_sd.title", "Not reaching showdown enough", "insight.underreach_sd.text", "Low WTSD with low WWSF can indicate over-folding and missed bluff-catch opportunities.", lowBy(stats.MetricWTSD) || lowBy(stats.MetricWWSF), []string{
+			insightEvidenceLine(s, stats.MetricWTSD, "WTSD", "22-30%", lang.X("insight.reason.wtsd_low", "Showdown frequency is low for balanced bluff-catching.")),
+			insightEvidenceLine(s, stats.MetricWWSF, "WWSF", "42-48%", lang.X("insight.reason.wwsf_low", "Postflop pot capture is below typical range.")),
+		})
+	}
+
+	afq, okAFq := s.Metric(stats.MetricAFq)
+	wonWithoutSD, okWNSD := s.Metric(stats.MetricWonWithoutSD)
+	if okWW && wwsf.Rate < 40 {
+		add("P0", "insight.low_wwsf.title", "Low postflop pot capture", "insight.low_wwsf.text", "You may be playing too passively postflop and failing to win enough pots after seeing the flop.", lowBy(stats.MetricWWSF), []string{
+			insightEvidenceLine(s, stats.MetricWWSF, "WWSF", "42-48%", lang.X("insight.reason.wwsf_low", "Postflop pot capture is below typical range.")),
+			insightEvidenceLine(s, stats.MetricAFq, "AFq", "40-55%", lang.X("insight.reason.afq_low", "Aggression frequency is on the passive side.")),
+			insightEvidenceLine(s, stats.MetricWonWithoutSD, "Won w/o SD", "45-55%", lang.X("insight.reason.won_without_sd_low", "Non-showdown pot capture is limited.")),
+		})
+	}
+	if okWNSD && wonWithoutSD.Rate > 58 && okWSD && wsd.Rate < 47 && okAFq && afq.Rate >= 55 {
+		add("P2", "insight.overbluff_bias.title", "Possible over-bluff bias", "insight.overbluff_bias.text", "Very high non-showdown wins with weaker showdown outcomes may become fragile versus stronger opponents.", lowBy(stats.MetricWonWithoutSD) || lowBy(stats.MetricWSD) || lowBy(stats.MetricAFq), []string{
+			insightEvidenceLine(s, stats.MetricWonWithoutSD, "Won w/o SD", "45-55%", lang.X("insight.reason.won_without_sd_high", "Non-showdown wins are unusually high.")),
+			insightEvidenceLine(s, stats.MetricWSD, "W$SD", "47-55%", lang.X("insight.reason.wsd_low", "Showdown performance is below standard range.")),
+			insightEvidenceLine(s, stats.MetricAFq, "AFq", "40-55%", lang.X("insight.reason.afq_high", "Aggression frequency is very high.")),
+		})
 	}
 	return out
 }
@@ -255,7 +407,8 @@ var metricRegistry = []MetricDefinition{
 		Label:          "Hands",
 		HelpKey:        "metric.hands.help",
 		HelpFallback:   "Total complete hands included in current stats scope.",
-		MinSamples:     200,
+		MinSamples:     300,
+		GoodSamples:    5000,
 		ShowInOverview: true,
 		ShowInPosition: true,
 		OverviewValue: func(s *stats.Stats) MetricValue {
@@ -272,34 +425,12 @@ var metricRegistry = []MetricDefinition{
 		},
 	},
 	{
-		ID:             "winRate",
-		Label:          "Win Rate",
-		HelpKey:        "metric.win_rate.help",
-		HelpFallback:   "Won hands / total hands.",
-		MinSamples:     200,
-		ShowInOverview: true,
-		ShowInPosition: true,
-		OverviewValue: func(s *stats.Stats) MetricValue {
-			if s == nil {
-				return MetricValue{Display: "0.0%", Color: theme.ForegroundColor(), Opportunities: 0}
-			}
-			rate := s.WinRate()
-			return MetricValue{Display: fmt.Sprintf("%.1f%%", rate), Color: colorForWinRate(rate), Opportunities: s.TotalHands}
-		},
-		PositionValue: func(ps *stats.PositionStats) MetricValue {
-			if ps == nil {
-				return MetricValue{Display: "0.0%", Color: theme.ForegroundColor(), Opportunities: 0}
-			}
-			rate := ps.WinRate()
-			return MetricValue{Display: fmt.Sprintf("%.1f%%", rate), Color: colorForWinRate(rate), Opportunities: ps.Hands}
-		},
-	},
-	{
 		ID:             "profit",
 		Label:          "Total Profit",
 		HelpKey:        "metric.profit.help",
 		HelpFallback:   "Total chips won minus invested chips.",
-		MinSamples:     200,
+		MinSamples:     300,
+		GoodSamples:    5000,
 		ShowInOverview: true,
 		ShowInPosition: true,
 		OverviewValue: func(s *stats.Stats) MetricValue {
@@ -321,16 +452,14 @@ var metricRegistry = []MetricDefinition{
 
 func addStatsMetricDefinition(id stats.MetricID, label, helpKey, helpFallback string, showPosition bool) {
 	idCopy := id
-	minSamples := 50
-	if id == stats.MetricVPIP || id == stats.MetricPFR || id == stats.MetricGap || id == stats.MetricRFI || id == stats.MetricColdCall || id == stats.MetricWonWithoutSD || id == stats.MetricBBPer100 {
-		minSamples = 200
-	}
+	th := thresholdForMetricID(string(id))
 	metricRegistry = append(metricRegistry, MetricDefinition{
 		ID:             string(id),
 		Label:          label,
 		HelpKey:        helpKey,
 		HelpFallback:   helpFallback,
-		MinSamples:     minSamples,
+		MinSamples:     th.Min,
+		GoodSamples:    th.Good,
 		ShowInOverview: true,
 		ShowInPosition: showPosition,
 		StatsMetricID:  &idCopy,
@@ -376,29 +505,40 @@ func vRateOrZero(s *stats.Stats, id stats.MetricID) float64 {
 }
 
 func init() {
+	// Preflop participation and opening
 	addStatsMetricDefinition(stats.MetricVPIP, "VPIP", "metric.vpip.help", "Voluntarily Put Money In Pot. Preflop participation frequency.", true)
 	addStatsMetricDefinition(stats.MetricPFR, "PFR", "metric.pfr.help", "Preflop raise frequency.", true)
 	addStatsMetricDefinition(stats.MetricGap, "VPIP-PFR Gap", "metric.gap.help", "VPIP minus PFR. Larger gap implies more passive preflop entries.", false)
 	addStatsMetricDefinition(stats.MetricRFI, "RFI", "metric.rfi.help", "Raise First In frequency.", false)
-	addStatsMetricDefinition(stats.MetricColdCall, "Cold Call", "metric.cold_call.help", "Call preflop after someone opened while you were not yet in the pot.", false)
-	addStatsMetricDefinition(stats.MetricThreeBet, "3Bet", "metric.three_bet.help", "3-bet frequency when a 3-bet opportunity is present.", true)
-	addStatsMetricDefinition(stats.MetricFoldToThreeBet, "Fold to 3Bet", "metric.fold_to_three_bet.help", "Fold frequency when facing a 3-bet after opening.", true)
 	addStatsMetricDefinition(stats.MetricSteal, "Steal Attempt", "metric.steal.help", "Open-raise attempt from steal positions when folded to you.", false)
+
+	// 3-bet/4-bet and preflop pressure
+	addStatsMetricDefinition(stats.MetricThreeBet, "3Bet", "metric.three_bet.help", "3-bet frequency when a 3-bet opportunity is present.", true)
+	addStatsMetricDefinition(stats.MetricThreeBetVsSteal, "3Bet vs Steal", "metric.three_bet_vs_steal.help", "3-bet frequency from blinds versus steal opens.", false)
+	addStatsMetricDefinition(stats.MetricFoldToThreeBet, "Fold to 3Bet", "metric.fold_to_three_bet.help", "Fold frequency when facing a 3-bet after opening.", true)
+	addStatsMetricDefinition(stats.MetricFourBet, "4Bet", "metric.four_bet.help", "4-bet frequency when facing a 3-bet.", false)
+	addStatsMetricDefinition(stats.MetricSqueeze, "Squeeze", "metric.squeeze.help", "Squeeze frequency after open + caller before you act.", false)
+
+	// Blind defense
 	addStatsMetricDefinition(stats.MetricFoldToSteal, "Fold to Steal", "metric.fold_to_steal.help", "Fold frequency in blinds versus steal attempts.", false)
+	addStatsMetricDefinition(stats.MetricFoldBBToSteal, "Fold BB to Steal", "metric.fold_bb_to_steal.help", "Fold frequency from BB versus steal opens.", false)
+	addStatsMetricDefinition(stats.MetricFoldSBToSteal, "Fold SB to Steal", "metric.fold_sb_to_steal.help", "Fold frequency from SB versus steal opens.", false)
+
+	// C-bet and response
 	addStatsMetricDefinition(stats.MetricFlopCBet, "Flop CBet", "metric.flop_cbet.help", "Continuation bet frequency on flop as preflop aggressor.", false)
 	addStatsMetricDefinition(stats.MetricTurnCBet, "Turn CBet", "metric.turn_cbet.help", "Continuation bet frequency on turn.", false)
-	addStatsMetricDefinition(stats.MetricRiverCBet, "River CBet", "metric.river_cbet.help", "Continuation bet frequency on river.", false)
+	addStatsMetricDefinition(stats.MetricDelayedCBet, "Delayed CBet", "metric.delayed_cbet.help", "Delayed continuation bet frequency (check flop, bet turn).", false)
 	addStatsMetricDefinition(stats.MetricFoldToFlopCBet, "Fold to Flop CBet", "metric.fold_to_flop_cbet.help", "Fold frequency when facing flop c-bet.", false)
 	addStatsMetricDefinition(stats.MetricFoldToTurnCBet, "Fold to Turn CBet", "metric.fold_to_turn_cbet.help", "Fold frequency when facing turn c-bet.", false)
-	addStatsMetricDefinition(stats.MetricFoldToRiverCBet, "Fold to River CBet", "metric.fold_to_river_cbet.help", "Fold frequency when facing river c-bet.", false)
+
+	// Showdown and postflop profile
 	addStatsMetricDefinition(stats.MetricWTSD, "WTSD", "metric.wtsd.help", "Went to showdown after seeing flop.", false)
 	addStatsMetricDefinition(stats.MetricWSD, "W$SD", "metric.w_sd.help", "Won money at showdown.", true)
 	addStatsMetricDefinition(stats.MetricWWSF, "WWSF", "metric.wwsf.help", "Won when saw flop.", false)
 	addStatsMetricDefinition(stats.MetricAFq, "AFq", "metric.afq.help", "Aggression frequency: (bet+raise)/(actions postflop).", false)
 	addStatsMetricDefinition(stats.MetricAF, "AF", "metric.af.help", "Aggression factor: (bet+raise)/call.", false)
-	addStatsMetricDefinition(stats.MetricCheckRaise, "Check-Raise", "metric.check_raise.help", "Check-raise frequency postflop.", false)
-	addStatsMetricDefinition(stats.MetricDelayedCBet, "Delayed CBet", "metric.delayed_cbet.help", "Delayed continuation bet frequency (check flop, bet turn).", false)
+
+	// Result profile
 	addStatsMetricDefinition(stats.MetricWonWithoutSD, "Won without SD", "metric.won_without_sd.help", "Won hand without reaching showdown.", false)
-	addStatsMetricDefinition(stats.MetricWonAtSD, "Won at SD", "metric.won_at_sd.help", "Won hand at showdown.", false)
 	addStatsMetricDefinition(stats.MetricBBPer100, "bb/100", "metric.bb_per_100.help", "Net big blinds won per 100 hands.", false)
 }

@@ -12,36 +12,51 @@ import (
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/parser"
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/persistence"
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/stats"
-	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/watcher"
 )
 
 var reNewGame = regexp.MustCompile(`\[Table\]: Preparing for New Game`)
 
-type Service struct {
-	mu        sync.RWMutex
-	repo      persistence.ImportRepository
-	parser    *parser.Parser
-	calc      *stats.Calculator
-	logPath   string
-	localSeat int
+type LogFileLocator func() ([]string, error)
 
-	parsedHands        int
-	currentLineNumber  int64
-	currentHandStartLn int64
+type Service struct {
+	mu             sync.RWMutex
+	repo           persistence.ImportRepository
+	parser         *parser.Parser
+	calc           *stats.Calculator
+	logPath        string
+	localSeat      int
+	detectLogFiles LogFileLocator
+
+	parsedHands          int
+	currentLineNumber    int64
+	currentHandStartLn   int64
+	currentByteOffset    int64
+	currentHandStartByte int64
 }
 
-func NewService(repo persistence.ImportRepository) *Service {
+func NewService(repo persistence.ImportRepository, locator LogFileLocator) *Service {
+	if locator == nil {
+		locator = func() ([]string, error) {
+			return nil, fmt.Errorf("log file locator is not configured")
+		}
+	}
+
 	return &Service{
 		repo:               repo,
 		parser:             parser.NewParser(),
 		calc:               stats.NewCalculator(),
 		localSeat:          -1,
-		currentHandStartLn: 1,
+		currentHandStartLn: 0,
+		detectLogFiles:     locator,
 	}
 }
 
-func (s *Service) BootstrapImportAllLogs() (string, error) {
-	paths, err := watcher.DetectAllLogFiles()
+func (s *Service) BootstrapImportAllLogs(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
+	paths, err := s.detectLogFiles()
 	if err != nil {
 		return "", err
 	}
@@ -55,24 +70,21 @@ func (s *Service) BootstrapImportAllLogs() (string, error) {
 		reversed[i] = paths[len(paths)-1-i]
 	}
 
-	for _, p := range reversed {
-		if err := s.importFile(p, false); err != nil {
+	for i, p := range reversed {
+		activate := i == len(reversed)-1
+		if err := s.importFile(ctx, p, activate); err != nil {
 			return "", err
 		}
 	}
 
-	latest := paths[0]
-	if err := s.importFile(latest, true); err != nil {
-		return "", err
-	}
-	return latest, nil
+	return paths[0], nil
 }
 
-func (s *Service) ChangeLogFile(path string) error {
-	return s.importFile(path, true)
+func (s *Service) ChangeLogFile(ctx context.Context, path string) error {
+	return s.importFile(ctx, path, true)
 }
 
-func (s *Service) importFile(path string, activate bool) error {
+func (s *Service) importFile(ctx context.Context, path string, activate bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -81,19 +93,26 @@ func (s *Service) importFile(path string, activate bool) error {
 
 	p := parser.NewParser()
 	lineNo := int64(0)
-	handStart := int64(1)
+	handStartLn := int64(0)
+	byteOffset := int64(0)
+	handStartByte := int64(0)
 	parsedHands := 0
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 1024*1024), 4*1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		lineNo++
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 
-		if reNewGame.MatchString(line) {
-			if handStart == 0 {
-				handStart = lineNo
-			}
+		line := scanner.Text()
+		lineStartByte := byteOffset
+		lineNo++
+		byteOffset += int64(len(line)) + 1
+
+		if reNewGame.MatchString(line) && handStartLn <= 0 {
+			handStartLn = lineNo
+			handStartByte = lineStartByte
 		}
 
 		_ = p.ParseLine(line)
@@ -102,21 +121,30 @@ func (s *Service) importFile(path string, activate bool) error {
 			newRows := make([]persistence.PersistedHand, 0, len(hands)-parsedHands)
 			for i := parsedHands; i < len(hands); i++ {
 				h := hands[i]
-				if handStart <= 0 {
-					handStart = maxInt64(1, lineNo)
+				if handStartLn <= 0 {
+					handStartLn = maxInt64(1, lineNo)
+					handStartByte = lineStartByte
 				}
 				source := persistence.HandSourceRef{
 					SourcePath: path,
-					StartByte:  handStart,
-					EndByte:    lineNo,
-					StartLine:  handStart,
+					StartByte:  handStartByte,
+					EndByte:    byteOffset,
+					StartLine:  handStartLn,
 					EndLine:    lineNo,
 				}
 				source.HandUID = persistence.GenerateHandUID(h, source)
 				newRows = append(newRows, persistence.PersistedHand{Hand: h, Source: source})
-				handStart = lineNo
+				handStartLn = lineNo
+				handStartByte = byteOffset
 			}
-			if _, err := s.repo.UpsertHands(context.Background(), newRows); err != nil {
+
+			cursor := persistence.ImportCursor{
+				SourcePath:     path,
+				NextByteOffset: byteOffset,
+				NextLineNumber: lineNo,
+				UpdatedAt:      time.Now(),
+			}
+			if err := s.saveImportBatch(ctx, newRows, cursor); err != nil {
 				return fmt.Errorf("save imported hands: %w", err)
 			}
 			parsedHands = len(hands)
@@ -126,9 +154,9 @@ func (s *Service) importFile(path string, activate bool) error {
 		return err
 	}
 
-	if err := s.repo.SaveCursor(context.Background(), persistence.ImportCursor{
+	if err := s.saveImportBatch(ctx, nil, persistence.ImportCursor{
 		SourcePath:     path,
-		NextByteOffset: 0,
+		NextByteOffset: byteOffset,
 		NextLineNumber: lineNo,
 		UpdatedAt:      time.Now(),
 	}); err != nil {
@@ -142,68 +170,118 @@ func (s *Service) importFile(path string, activate bool) error {
 		s.localSeat = p.GetLocalSeat()
 		s.parsedHands = parsedHands
 		s.currentLineNumber = lineNo
-		s.currentHandStartLn = maxInt64(handStart, 1)
+		s.currentHandStartLn = maxInt64(handStartLn, 1)
+		s.currentByteOffset = byteOffset
+		s.currentHandStartByte = maxInt64(handStartByte, 0)
 		s.mu.Unlock()
 	}
 
 	return nil
 }
 
-func (s *Service) ImportLines(lines []string, _ int64, endOffset int64) error {
-	s.mu.Lock()
-	p := s.parser
-	path := s.logPath
+func (s *Service) ImportLines(ctx context.Context, sourcePath string, lines []string, startOffset int64, endOffset int64) error {
+	if len(lines) == 0 {
+		return nil
+	}
+
+	s.mu.RLock()
+	if sourcePath == "" {
+		sourcePath = s.logPath
+	}
+	if sourcePath == "" || sourcePath != s.logPath {
+		s.mu.RUnlock()
+		return nil
+	}
+
+	workingParser := s.parser.Clone()
 	parsedHands := s.parsedHands
 	lineNo := s.currentLineNumber
-	handStart := s.currentHandStartLn
+	handStartLn := s.currentHandStartLn
+	byteOffset := s.currentByteOffset
+	handStartByte := s.currentHandStartByte
+	s.mu.RUnlock()
+
+	if startOffset > 0 {
+		byteOffset = startOffset
+		if handStartByte <= 0 {
+			handStartByte = startOffset
+		}
+	}
 
 	newRows := make([]persistence.PersistedHand, 0)
-	for _, line := range lines {
-		lineNo++
-		if reNewGame.MatchString(line) && handStart <= 0 {
-			handStart = lineNo
+	for i, line := range lines {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		_ = p.ParseLine(line)
-		hands := p.GetHands()
+
+		lineStartByte := byteOffset
+		lineNo++
+		lineEndByte := lineStartByte + int64(len(line))
+		if i < len(lines)-1 {
+			lineEndByte++
+		} else if endOffset > lineEndByte {
+			lineEndByte = endOffset
+		}
+		byteOffset = lineEndByte
+
+		if reNewGame.MatchString(line) && handStartLn <= 0 {
+			handStartLn = lineNo
+			handStartByte = lineStartByte
+		}
+
+		_ = workingParser.ParseLine(line)
+		hands := workingParser.GetHands()
 		if len(hands) > parsedHands {
-			for i := parsedHands; i < len(hands); i++ {
-				h := hands[i]
-				if handStart <= 0 {
-					handStart = lineNo
+			for idx := parsedHands; idx < len(hands); idx++ {
+				h := hands[idx]
+				if handStartLn <= 0 {
+					handStartLn = lineNo
+					handStartByte = lineStartByte
 				}
 				source := persistence.HandSourceRef{
-					SourcePath: path,
-					StartByte:  handStart,
-					EndByte:    lineNo,
-					StartLine:  handStart,
+					SourcePath: sourcePath,
+					StartByte:  handStartByte,
+					EndByte:    lineEndByte,
+					StartLine:  handStartLn,
 					EndLine:    lineNo,
 				}
 				source.HandUID = persistence.GenerateHandUID(h, source)
 				newRows = append(newRows, persistence.PersistedHand{Hand: h, Source: source})
-				handStart = lineNo
+				handStartLn = lineNo
+				handStartByte = lineEndByte
 			}
 			parsedHands = len(hands)
 		}
 	}
 
-	s.localSeat = p.GetLocalSeat()
-	s.parsedHands = parsedHands
-	s.currentLineNumber = lineNo
-	s.currentHandStartLn = handStart
-	s.mu.Unlock()
-
-	if len(newRows) > 0 {
-		if _, err := s.repo.UpsertHands(context.Background(), newRows); err != nil {
-			return err
-		}
+	if endOffset > byteOffset {
+		byteOffset = endOffset
 	}
 
-	return s.repo.SaveCursor(context.Background(), persistence.ImportCursor{
-		SourcePath:     path,
-		NextByteOffset: endOffset,
+	cursor := persistence.ImportCursor{
+		SourcePath:     sourcePath,
+		NextByteOffset: byteOffset,
 		NextLineNumber: lineNo,
 		UpdatedAt:      time.Now(),
-	})
+	}
+	if err := s.saveImportBatch(ctx, newRows, cursor); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sourcePath != s.logPath {
+		return nil
+	}
+	s.parser = workingParser
+	s.localSeat = workingParser.GetLocalSeat()
+	s.parsedHands = parsedHands
+	s.currentLineNumber = lineNo
+	s.currentHandStartLn = maxInt64(handStartLn, 1)
+	s.currentByteOffset = byteOffset
+	s.currentHandStartByte = maxInt64(handStartByte, 0)
+
+	return nil
 }
 
 func (s *Service) LogPath() string {
@@ -212,7 +290,22 @@ func (s *Service) LogPath() string {
 	return s.logPath
 }
 
-func (s *Service) Snapshot() (*stats.Stats, []*parser.Hand, int, error) {
+func (s *Service) GetCursor(ctx context.Context, path string) (*persistence.ImportCursor, error) {
+	if path == "" {
+		return nil, nil
+	}
+	return s.repo.GetCursor(ctx, path)
+}
+
+func (s *Service) NextOffset(ctx context.Context, path string) (int64, error) {
+	cursor, err := s.GetCursor(ctx, path)
+	if err != nil || cursor == nil {
+		return 0, err
+	}
+	return cursor.NextByteOffset, nil
+}
+
+func (s *Service) Snapshot(ctx context.Context) (*stats.Stats, []*parser.Hand, int, error) {
 	s.mu.RLock()
 	localSeat := s.localSeat
 	calc := s.calc
@@ -221,13 +314,34 @@ func (s *Service) Snapshot() (*stats.Stats, []*parser.Hand, int, error) {
 	var filter persistence.HandFilter
 	filter.OnlyComplete = true
 
-	hands, err := s.repo.ListHands(context.Background(), filter)
+	hands, err := s.repo.ListHands(ctx, filter)
 	if err != nil {
 		return nil, nil, localSeat, err
 	}
 
 	calculated := calc.Calculate(hands, localSeat)
 	return calculated, hands, localSeat, nil
+}
+
+func (s *Service) Close() error {
+	if c, ok := s.repo.(interface{ Close() error }); ok {
+		return c.Close()
+	}
+	return nil
+}
+
+func (s *Service) saveImportBatch(ctx context.Context, hands []persistence.PersistedHand, cursor persistence.ImportCursor) error {
+	if repo, ok := s.repo.(persistence.ImportBatchRepository); ok {
+		_, err := repo.SaveImportBatch(ctx, hands, cursor)
+		return err
+	}
+
+	if len(hands) > 0 {
+		if _, err := s.repo.UpsertHands(ctx, hands); err != nil {
+			return err
+		}
+	}
+	return s.repo.SaveCursor(ctx, cursor)
 }
 
 func maxInt64(a, b int64) int64 {

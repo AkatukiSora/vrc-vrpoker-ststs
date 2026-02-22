@@ -315,6 +315,71 @@ func handSummaryEntryFields(h *parser.Hand, localSeat int) ([]string, []string) 
 	return line1, line2
 }
 
+type handListEntryRefs struct {
+	line1 []*widget.Label
+	line2 []*widget.Label
+}
+
+func newHandListEntryRow() (fyne.CanvasObject, *handListEntryRefs) {
+	newCell := func(style fyne.TextStyle) *widget.Label {
+		lbl := widget.NewLabel("")
+		lbl.Alignment = fyne.TextAlignLeading
+		lbl.TextStyle = style
+		lbl.Wrapping = fyne.TextWrapOff
+		lbl.Truncation = fyne.TextTruncateEllipsis
+		return lbl
+	}
+
+	line1Refs := make([]*widget.Label, 0, 4)
+	line1Objs := make([]fyne.CanvasObject, 0, 4)
+	for i := 0; i < 4; i++ {
+		lbl := newCell(fyne.TextStyle{Bold: true})
+		line1Refs = append(line1Refs, lbl)
+		line1Objs = append(line1Objs, lbl)
+	}
+
+	line2Refs := make([]*widget.Label, 0, 5)
+	line2Objs := make([]fyne.CanvasObject, 0, 5)
+	for i := 0; i < 5; i++ {
+		lbl := newCell(fyne.TextStyle{Italic: true})
+		line2Refs = append(line2Refs, lbl)
+		line2Objs = append(line2Objs, lbl)
+	}
+
+	line1Wrap := container.New(newWeightedMinRowLayout(
+		[]float32{0.7, 1.1, 1.8, 3.4},
+		[]float32{56, 88, 128, 210},
+		theme.Padding(),
+	), line1Objs...)
+	line2Wrap := container.New(newWeightedMinRowLayout(
+		[]float32{1.0, 1.2, 1.0, 0.8, 1.0},
+		[]float32{88, 96, 84, 72, 88},
+		theme.Padding(),
+	), line2Objs...)
+
+	body := container.NewVBox(line1Wrap, line2Wrap)
+	root := container.NewPadded(newSectionCard(body))
+
+	return root, &handListEntryRefs{line1: line1Refs, line2: line2Refs}
+}
+
+func (r *handListEntryRefs) setFields(line1, line2 []string) {
+	for i, lbl := range r.line1 {
+		if i < len(line1) {
+			lbl.SetText(line1[i])
+		} else {
+			lbl.SetText("")
+		}
+	}
+	for i, lbl := range r.line2 {
+		if i < len(line2) {
+			lbl.SetText(line2[i])
+		} else {
+			lbl.SetText("")
+		}
+	}
+}
+
 func signedChips(v int) string {
 	if v > 0 {
 		return fmt.Sprintf("+%d", v)
@@ -385,34 +450,30 @@ func streetActions(h *parser.Hand, street parser.Street) []seatAction {
 	return out
 }
 
+func actionLineColor(sa seatAction, localSeat, openRaiser int) color.Color {
+	lineColor := color.NRGBA{R: 0xD0, G: 0xD8, B: 0xE2, A: 0xFF}
+	if sa.seat == openRaiser {
+		lineColor = color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0xFF}
+	}
+	if sa.seat == localSeat {
+		lineColor = color.NRGBA{R: 0x66, G: 0xBB, B: 0x6A, A: 0xFF}
+	}
+	if sa.seat == localSeat && sa.seat == openRaiser {
+		lineColor = color.NRGBA{R: 0x7E, G: 0x57, B: 0xC2, A: 0xFF}
+	}
+	return lineColor
+}
+
 func streetActionSection(h *parser.Hand, street parser.Street, localSeat, openRaiser int, normalSize float32) fyne.CanvasObject {
 	actions := streetActions(h, street)
 	if len(actions) == 0 {
 		return nil
 	}
 
-	sep := canvas.NewRectangle(theme.ShadowColor())
-	sep.SetMinSize(fyne.NewSize(0, 1))
+	header := widget.NewLabelWithStyle(strings.ToUpper(street.String()), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	header.Wrapping = fyne.TextWrapWord
 
-	header := canvas.NewText(strings.ToUpper(street.String()), color.NRGBA{R: 0xCF, G: 0xD8, B: 0xDC, A: 0xFF})
-	header.TextStyle = fyne.TextStyle{Bold: true}
-	header.TextSize = normalSize * 1.2
-	header.Alignment = fyne.TextAlignLeading
-
-	colHeadColor := color.NRGBA{R: 0xB0, G: 0xBE, B: 0xC5, A: 0xFF}
-	colSeat := canvas.NewText(lang.X("hand_history.action_col.seat", "Seat"), colHeadColor)
-	colAction := canvas.NewText(lang.X("hand_history.action_col.action", "Action"), colHeadColor)
-	colAmount := canvas.NewText(lang.X("hand_history.action_col.amount", "Amount"), colHeadColor)
-	colTime := canvas.NewText(lang.X("hand_history.action_col.time", "Time"), colHeadColor)
-	for _, c := range []*canvas.Text{colSeat, colAction, colAmount, colTime} {
-		c.TextStyle = fyne.TextStyle{Bold: true}
-		c.TextSize = normalSize * 0.92
-		c.Alignment = fyne.TextAlignLeading
-	}
-
-	tableRows := make([]fyne.CanvasObject, 0, len(actions)+1)
-	tableRows = append(tableRows, container.NewGridWithColumns(4, colSeat, colAction, colAmount, colTime))
-
+	rows := make([]fyne.CanvasObject, 0, len(actions))
 	for _, sa := range actions {
 		seatLabel := lang.X("hand_history.seat", "Seat {{.N}}", map[string]any{"N": sa.seat})
 		if sa.seat == localSeat {
@@ -431,39 +492,32 @@ func streetActionSection(h *parser.Hand, street parser.Street, localSeat, openRa
 			timeText = sa.act.Timestamp.Format("15:04:05")
 		}
 
-		lineColor := color.NRGBA{R: 0xE0, G: 0xE0, B: 0xE0, A: 0xFF}
-		if sa.seat == openRaiser {
-			lineColor = color.NRGBA{R: 0xFF, G: 0xB3, B: 0x00, A: 0xFF}
-		}
-		if sa.seat == localSeat {
-			lineColor = color.NRGBA{R: 0x66, G: 0xBB, B: 0x6A, A: 0xFF}
-		}
-		if sa.seat == localSeat && sa.seat == openRaiser {
-			lineColor = color.NRGBA{R: 0x7E, G: 0x57, B: 0xC2, A: 0xFF}
-		}
+		lineColor := actionLineColor(sa, localSeat, openRaiser)
+		headline := canvas.NewText(lang.X("hand_history.timeline.headline", "{{.Seat}} - {{.Action}} ({{.Amount}})", map[string]any{
+			"Seat":   seatLabel,
+			"Action": sa.act.Action.String(),
+			"Amount": amount,
+		}), lineColor)
+		headline.TextStyle = fyne.TextStyle{Bold: true}
+		headline.TextSize = normalSize
+		headline.Alignment = fyne.TextAlignLeading
 
-		seatTxt := canvas.NewText(seatLabel, lineColor)
-		actionTxt := canvas.NewText(sa.act.Action.String(), lineColor)
-		amountTxt := canvas.NewText(amount, lineColor)
-		timeTxt := canvas.NewText(timeText, lineColor)
-		for _, c := range []*canvas.Text{seatTxt, actionTxt, amountTxt, timeTxt} {
-			c.TextSize = normalSize
-			c.Alignment = fyne.TextAlignLeading
-		}
+		timeLabel := newSubtleText(lang.X("hand_history.timeline.time", "Time: {{.T}}", map[string]any{"T": timeText}))
 
-		tableRows = append(tableRows, container.NewGridWithColumns(4, seatTxt, actionTxt, amountTxt, timeTxt))
+		dot := canvas.NewCircle(lineColor)
+		dotSlot := canvas.NewRectangle(color.Transparent)
+		dotSlot.SetMinSize(fyne.NewSize(18, 18))
+		dotWrap := container.NewStack(dotSlot, container.NewCenter(dot))
+		rows = append(rows, container.NewHBox(dotWrap, container.NewVBox(headline, timeLabel)))
 	}
 
-	return container.NewVBox(sep, header, container.NewVBox(tableRows...))
+	return newSectionCard(container.NewVBox(header, container.NewVBox(rows...)))
 }
 
 // buildDetailPanel creates the right-side detail view for a selected hand.
 func buildDetailPanel(h *parser.Hand, localSeat int) fyne.CanvasObject {
 	if h == nil {
-		msg := widget.NewLabel(lang.X("hand_history.select_hand", "Select a hand to see details."))
-		msg.Alignment = fyne.TextAlignCenter
-		msg.TextStyle = fyne.TextStyle{Italic: true}
-		return container.NewCenter(msg)
+		return newCenteredEmptyState(lang.X("hand_history.select_hand", "Select a hand to see details."))
 	}
 
 	seat := localSeatForHand(h, localSeat)
@@ -610,29 +664,12 @@ func buildDetailPanel(h *parser.Hand, localSeat int) fyne.CanvasObject {
 		actionSections = append(actionSections, widget.NewLabel(lang.X("hand_history.no_actions", "No actions recorded")))
 	}
 
-	// ----- Assemble -----
-	boardSection := container.NewVBox(boardRows...)
-	actionsSection := container.NewVBox(actionSections...)
+	boardSection := newSectionCard(container.NewVBox(commHeader, container.NewVBox(boardRows...)))
+	holeSection := newSectionCard(container.NewVBox(holeHeader, holeRow))
+	resultSection := newSectionCard(container.NewVBox(resultHeader, resultTable))
+	actionsSection := newSectionCard(container.NewVBox(actionsHeader, container.NewVBox(actionSections...)))
 
-	sep := func() fyne.CanvasObject {
-		r := canvas.NewRectangle(theme.ShadowColor())
-		r.SetMinSize(fyne.NewSize(0, 1))
-		return r
-	}
-
-	content := container.NewVBox(
-		holeHeader,
-		holeRow,
-		sep(),
-		commHeader,
-		boardSection,
-		sep(),
-		resultHeader,
-		resultTable,
-		sep(),
-		actionsHeader,
-		actionsSection,
-	)
+	content := container.NewVBox(holeSection, boardSection, resultSection, actionsSection)
 
 	return container.NewScroll(container.NewPadded(content))
 }
@@ -640,84 +677,43 @@ func buildDetailPanel(h *parser.Hand, localSeat int) fyne.CanvasObject {
 // NewHandHistoryTab creates the "Hand History" tab canvas object.
 // hands should be in chronological order; this function reverses them for display.
 func NewHandHistoryTab(hands []*parser.Hand, localSeat int, state *HandHistoryViewState) fyne.CanvasObject {
-	if len(hands) == 0 {
-		msg := widget.NewLabel(lang.X("hand_history.no_hands", "No hands recorded yet.\nStart playing in the VR Poker world!"))
-		msg.Alignment = fyne.TextAlignCenter
-		msg.Wrapping = fyne.TextWrapWord
-		return container.NewCenter(msg)
+	validHands := make([]*parser.Hand, 0, len(hands))
+	for _, h := range hands {
+		if h != nil {
+			validHands = append(validHands, h)
+		}
+	}
+
+	if len(validHands) == 0 {
+		return newCenteredEmptyState(lang.X("hand_history.no_hands", "No hands recorded yet.\nStart playing in the VR Poker world!"))
 	}
 	if state == nil {
 		state = &HandHistoryViewState{SelectedHandID: -1}
 	}
 
 	// Reverse order: newest first.
-	reversed := make([]*parser.Hand, len(hands))
-	for i, h := range hands {
-		reversed[len(hands)-1-i] = h
+	reversed := make([]*parser.Hand, len(validHands))
+	for i, h := range validHands {
+		reversed[len(validHands)-1-i] = h
 	}
 
-	// Detail panel placeholder – replaced on selection.
+	// Detail panel placeholder - replaced on selection.
 	detailContent := container.NewStack()
 	detailContent.Objects = []fyne.CanvasObject{buildDetailPanel(nil, localSeat)}
+	rowRefs := make(map[fyne.CanvasObject]*handListEntryRefs)
 
 	list := widget.NewList(
 		func() int { return len(reversed) },
 		func() fyne.CanvasObject {
-			row1 := make([]fyne.CanvasObject, 0, 4)
-			for i := 0; i < 4; i++ {
-				lbl := widget.NewLabel("")
-				lbl.Alignment = fyne.TextAlignLeading
-				lbl.TextStyle = fyne.TextStyle{Bold: true}
-				row1 = append(row1, lbl)
-			}
-
-			row2 := make([]fyne.CanvasObject, 0, 5)
-			for i := 0; i < 5; i++ {
-				lbl := widget.NewLabel("")
-				lbl.Alignment = fyne.TextAlignLeading
-				lbl.TextStyle = fyne.TextStyle{Italic: true}
-				row2 = append(row2, lbl)
-			}
-
-			row1Wrap := container.New(newWeightedMinRowLayout(
-				[]float32{0.7, 1.1, 1.8, 3.4},
-				[]float32{56, 88, 128, 210},
-				theme.Padding(),
-			), row1...)
-			row2Wrap := container.New(newWeightedMinRowLayout(
-				[]float32{1.0, 1.2, 1.0, 0.8, 1.0},
-				[]float32{88, 96, 84, 72, 88},
-				theme.Padding(),
-			), row2...)
-
-			body := container.NewVBox(row1Wrap, row2Wrap)
-
-			entryBg := canvas.NewRectangle(brightenColor(theme.InputBackgroundColor(), 0.10))
-			entryBg.CornerRadius = 6
-			card := container.NewStack(entryBg, container.NewPadded(body))
-
-			gapTop := canvas.NewRectangle(color.Transparent)
-			gapTop.SetMinSize(fyne.NewSize(0, 3))
-			gapBottom := canvas.NewRectangle(color.Transparent)
-			gapBottom.SetMinSize(fyne.NewSize(0, 3))
-			return container.NewVBox(gapTop, card, gapBottom)
+			row, refs := newHandListEntryRow()
+			rowRefs[row] = refs
+			return row
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			entry := obj.(*fyne.Container)
-			card := entry.Objects[1].(*fyne.Container)
-			padded := card.Objects[1].(*fyne.Container)
-			vbox := padded.Objects[0].(*fyne.Container)
 			h := reversed[id]
 			line1, line2 := handSummaryEntryFields(h, localSeat)
-
-			row1 := vbox.Objects[0].(*fyne.Container)
-			for i := 0; i < 4; i++ {
-				row1.Objects[i].(*widget.Label).SetText(line1[i])
-			}
-
-			row2 := vbox.Objects[1].(*fyne.Container)
-			for i := 0; i < 5; i++ {
-				row2.Objects[i].(*widget.Label).SetText(line2[i])
+			if refs, ok := rowRefs[obj]; ok {
+				refs.setFields(line1, line2)
 			}
 		},
 	)
@@ -739,10 +735,12 @@ func NewHandHistoryTab(hands []*parser.Hand, localSeat int, state *HandHistoryVi
 		}
 	}
 
-	listWithSharedHScroll := container.NewHScroll(list)
-
-	split := container.NewHSplit(listWithSharedHScroll, detailContent)
+	split := container.NewHSplit(list, detailContent)
 	split.Offset = 0.48
 
-	return split
+	title := widget.NewLabelWithStyle(lang.X("hand_history.title", "Recent Hands"), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	subtitle := widget.NewLabel(lang.X("hand_history.subtitle", "Select a hand to inspect street-by-street action flow."))
+	subtitle.Wrapping = fyne.TextWrapWord
+
+	return container.NewBorder(container.NewVBox(title, subtitle, newSectionDivider()), nil, nil, nil, split)
 }

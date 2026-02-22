@@ -2,6 +2,7 @@ package parser
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"regexp"
 	"strconv"
@@ -764,7 +765,7 @@ func parseCards(s string) ([]Card, error) {
 func parseCard(s string) (Card, error) {
 	s = strings.TrimSpace(s)
 	if len(s) < 2 {
-		return Card{}, nil
+		return Card{}, fmt.Errorf("invalid card token: %q", s)
 	}
 	suit := string(s[len(s)-1])
 	rank := s[:len(s)-1]
@@ -776,7 +777,7 @@ func parseCard(s string) (Card, error) {
 		"J": true, "Q": true, "K": true, "A": true,
 	}
 	if !validSuits[suit] || !validRanks[rank] {
-		return Card{}, nil
+		return Card{}, fmt.Errorf("invalid card token: %q", s)
 	}
 	return Card{Rank: rank, Suit: suit}, nil
 }

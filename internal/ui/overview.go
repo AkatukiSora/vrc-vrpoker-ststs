@@ -4,22 +4,22 @@ import (
 	"image/color"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/lang"
 	"fyne.io/fyne/v2/layout"
-	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/stats"
 )
 
-// statCard builds a single stat card with a name label and a large colored value label.
-func statCard(metric MetricDefinition, value string, valueColor color.Color, footnote string, showWarn bool, win fyne.Window) fyne.CanvasObject {
-	nameLabel := widget.NewLabel(metric.Label)
-	nameLabel.TextStyle = fyne.TextStyle{Bold: true}
-	nameLabel.Alignment = fyne.TextAlignCenter
+func overviewMetricCard(metric MetricDefinition, value MetricValue, win fyne.Window, hero bool) fyne.CanvasObject {
+	footnote := metricFootnoteText(value.Opportunities, metric.MinSamples)
+	showWarn := metric.MinSamples > 0 && value.Opportunities < metric.MinSamples
+
+	title := widget.NewLabel(metric.Label)
+	title.TextStyle = fyne.TextStyle{Bold: true}
+	title.Wrapping = fyne.TextWrapWord
 
 	helpBtn := widget.NewButton(lang.X("settings.help_button", "?"), func() {
 		if win == nil {
@@ -28,116 +28,166 @@ func statCard(metric MetricDefinition, value string, valueColor color.Color, foo
 		dialog.ShowInformation(metric.Label, metric.HelpText(), win)
 	})
 	helpBtn.Importance = widget.LowImportance
-	helpBtn.Resize(fyne.NewSize(24, helpBtn.MinSize().Height))
-	helpSlot := canvas.NewRectangle(color.Transparent)
-	helpSlot.SetMinSize(helpBtn.MinSize())
 
-	warn := canvas.NewText("", color.NRGBA{R: 0xFF, G: 0xC1, B: 0x07, A: 0xE8})
-	warn.TextStyle = fyne.TextStyle{Bold: true}
-	warn.Alignment = fyne.TextAlignTrailing
-	warn.TextSize = theme.TextSize() * 0.86
-	if showWarn {
-		warn.Text = lang.X("warn_icon.mark", "!")
+	warn := newWarnMark(showWarn)
+
+	header := container.NewBorder(nil, nil, nil, container.NewHBox(warn, helpBtn), title)
+
+	valueText := widget.NewRichTextFromMarkdown("`" + value.Display + "`")
+	valueText.Wrapping = fyne.TextWrapOff
+
+	foot := newSubtleText(footnote)
+	cardBody := container.NewVBox(header, valueText, container.NewHBox(layout.NewSpacer(), foot))
+
+	if hero {
+		return newHeroCard(cardBody)
+	}
+	return newSectionCard(cardBody)
+}
+
+func splitOverviewMetrics(metricDefs []MetricDefinition) ([]MetricDefinition, []MetricDefinition) {
+	priority := []string{"hands", "profit", "vpip", "pfr", "bb_per_100"}
+	hero := make([]MetricDefinition, 0, 3)
+	other := make([]MetricDefinition, 0, len(metricDefs))
+	used := make(map[string]struct{}, 3)
+
+	for _, want := range priority {
+		for _, metric := range metricDefs {
+			if metric.ID != want {
+				continue
+			}
+			hero = append(hero, metric)
+			used[metric.ID] = struct{}{}
+			break
+		}
 	}
 
-	titleRow := container.NewHBox(helpSlot, nameLabel, helpBtn)
-	head := container.NewBorder(nil, nil, nil, warn, container.NewCenter(titleRow))
+	for _, metric := range metricDefs {
+		if _, ok := used[metric.ID]; ok {
+			continue
+		}
+		other = append(other, metric)
+	}
 
-	valueText := canvas.NewText(value, valueColor)
-	valueText.TextStyle = fyne.TextStyle{Bold: true}
-	valueText.TextSize = theme.TextSize() * 1.6
-	valueText.Alignment = fyne.TextAlignCenter
+	if len(hero) == 0 {
+		if len(metricDefs) <= 3 {
+			return metricDefs, nil
+		}
+		return metricDefs[:3], metricDefs[3:]
+	}
+	return hero, other
+}
 
-	separator := canvas.NewRectangle(theme.ShadowColor())
-	separator.SetMinSize(fyne.NewSize(0, 1))
+func insightAccent(priority string) color.Color {
+	switch priority {
+	case "P0":
+		return uiDangerAccent
+	case "P1":
+		return uiWarningColor
+	default:
+		return uiInfoAccent
+	}
+}
 
-	foot := canvas.NewText(footnote, color.NRGBA{R: 0xA8, G: 0xAF, B: 0xB8, A: 0xFF})
-	foot.TextSize = theme.TextSize() * 0.82
-	foot.Alignment = fyne.TextAlignTrailing
+func overviewInsightCard(in trendInsight) fyne.CanvasObject {
+	title := widget.NewLabel(in.Title)
+	title.TextStyle = fyne.TextStyle{Bold: true}
+	title.Wrapping = fyne.TextWrapWord
 
-	card := container.NewVBox(
-		head,
-		separator,
-		container.NewCenter(valueText),
-		container.NewHBox(layout.NewSpacer(), foot),
-	)
+	severity := newMetricChip(in.Severity, insightAccent(in.Priority))
+	chips := []fyne.CanvasObject{severity}
+	if in.LowSample {
+		chips = append(chips, newMetricChip(lang.X("overview.low_sample_badge", "[low sample]"), uiWarningColor))
+	}
 
-	bg := canvas.NewRectangle(theme.OverlayBackgroundColor())
-	bg.CornerRadius = 6
+	body := widget.NewLabel(in.Text)
+	body.Wrapping = fyne.TextWrapWord
 
-	return container.NewStack(bg, container.NewPadded(card))
+	rows := []fyne.CanvasObject{container.NewHBox(chips...), title, body}
+	if len(in.Evidence) > 0 {
+		evidenceRows := make([]fyne.CanvasObject, 0, len(in.Evidence))
+		for _, ev := range in.Evidence {
+			evLabel := widget.NewLabel("- " + ev)
+			evLabel.Wrapping = fyne.TextWrapWord
+			evidenceRows = append(evidenceRows, evLabel)
+		}
+		rows = append(rows, widget.NewAccordion(
+			widget.NewAccordionItem(lang.X("overview.insight.evidence_toggle", "Show evidence"), container.NewVBox(evidenceRows...)),
+		))
+	}
+
+	return newSectionCard(container.NewVBox(rows...))
 }
 
 // NewOverviewTab returns the "Overview" tab canvas object.
 func NewOverviewTab(s *stats.Stats, visibility *MetricVisibilityState, win fyne.Window) fyne.CanvasObject {
-	// Empty state
 	if s == nil || s.TotalHands == 0 {
-		msg := widget.NewLabel(lang.X("overview.no_hands", "No hands recorded yet.\nStart playing in the VR Poker world!"))
-		msg.Alignment = fyne.TextAlignCenter
-		msg.Wrapping = fyne.TextWrapWord
-		return container.NewCenter(msg)
+		return newCenteredEmptyState(lang.X("overview.no_hands", "No hands recorded yet.\nStart playing in the VR Poker world!"))
 	}
 
-	// Title
-	title := widget.NewLabel(lang.X("overview.title", "Overall Statistics"))
-	title.TextStyle = fyne.TextStyle{Bold: true}
-	title.Alignment = fyne.TextAlignCenter
-
-	titleSep := canvas.NewRectangle(theme.PrimaryColor())
-	titleSep.SetMinSize(fyne.NewSize(0, 2))
-
-	// Build stat cards from metric registry
 	metricDefs := metricsForOverview(visibility)
-	cards := make([]fyne.CanvasObject, 0, len(metricDefs))
-	for _, metric := range metricDefs {
-		value := metric.OverviewValue(s)
-		footnote := metricFootnoteText(value.Opportunities, metric.MinSamples)
-		showWarn := metric.MinSamples > 0 && value.Opportunities < metric.MinSamples
-		cards = append(cards, statCard(metric, value.Display, value.Color, footnote, showWarn, win))
+	if len(metricDefs) == 0 {
+		return newCenteredEmptyState(lang.X("overview.no_metrics", "No metrics selected. Enable metrics in Settings."))
 	}
 
-	if len(cards) == 0 {
-		msg := widget.NewLabel(lang.X("overview.no_metrics", "No metrics selected. Enable metrics in Settings."))
-		msg.Alignment = fyne.TextAlignCenter
-		msg.Wrapping = fyne.TextWrapWord
-		return container.NewCenter(msg)
+	heroDefs, otherDefs := splitOverviewMetrics(metricDefs)
+	heroCards := make([]fyne.CanvasObject, 0, len(heroDefs))
+	for _, metric := range heroDefs {
+		heroCards = append(heroCards, overviewMetricCard(metric, metric.OverviewValue(s), win, true))
 	}
 
-	gridColumns := 3
-	if len(cards) < gridColumns {
-		gridColumns = len(cards)
+	otherCards := make([]fyne.CanvasObject, 0, len(otherDefs))
+	for _, metric := range otherDefs {
+		otherCards = append(otherCards, overviewMetricCard(metric, metric.OverviewValue(s), win, false))
 	}
-	grid := container.NewGridWithColumns(gridColumns, cards...)
 
 	insights := buildTrendInsights(s)
-	insightHeader := widget.NewLabel(lang.X("overview.leak_insights", "Leak Insights"))
-	insightHeader.TextStyle = fyne.TextStyle{Bold: true}
-	insightRows := make([]fyne.CanvasObject, 0, len(insights))
+	insightRows := make([]fyne.CanvasObject, 0, len(insights)+1)
 	if len(insights) == 0 {
-		insightRows = append(insightRows, widget.NewLabel(lang.X("overview.no_samples", "Not enough reliable samples yet for trend diagnostics.")))
+		none := widget.NewLabel(lang.X("overview.no_insight_signal", "No strong leak signal is detected right now."))
+		none.Wrapping = fyne.TextWrapWord
+		insightRows = append(insightRows, newSectionCard(none))
 	} else {
 		for _, in := range insights {
-			prefix := "[info]"
-			if in.Level == "warn" {
-				prefix = "[warn]"
-			}
-			if in.Level == "action" {
-				prefix = "[action]"
-			}
-			lbl := widget.NewLabel(prefix + " " + in.Text)
-			lbl.Wrapping = fyne.TextWrapWord
-			insightRows = append(insightRows, lbl)
+			insightRows = append(insightRows, overviewInsightCard(in))
 		}
 	}
-	insightBox := container.NewVBox(append([]fyne.CanvasObject{insightHeader}, insightRows...)...)
 
-	content := container.NewVBox(
-		container.NewPadded(title),
-		titleSep,
-		container.NewPadded(grid),
-		widget.NewSeparator(),
-		container.NewPadded(insightBox),
+	title := widget.NewLabelWithStyle(lang.X("overview.title", "Overall Statistics"), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	subtitle := widget.NewLabel(lang.X("overview.subtitle", "Track your baseline first, then drill into actionable leaks."))
+	subtitle.Wrapping = fyne.TextWrapWord
+
+	sections := []fyne.CanvasObject{
+		container.NewVBox(title, subtitle),
+		newSectionDivider(),
+		widget.NewLabelWithStyle(lang.X("overview.section.key_metrics", "Key Metrics"), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+	}
+
+	if len(heroCards) > 0 {
+		sections = append(sections, container.NewGridWithColumns(minInt(4, len(heroCards)), heroCards...))
+	}
+
+	if len(otherCards) > 0 {
+		sections = append(sections,
+			newSectionDivider(),
+			widget.NewLabelWithStyle(lang.X("overview.section.all_metrics", "All Visible Metrics"), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			container.NewGridWithColumns(minInt(3, len(otherCards)), otherCards...),
+		)
+	}
+
+	sections = append(sections,
+		newSectionDivider(),
+		widget.NewLabelWithStyle(lang.X("overview.section.insights", "Leak Insights"), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		container.NewVBox(insightRows...),
 	)
 
+	content := container.NewPadded(container.NewVBox(sections...))
 	return withFixedLowSampleLegend(container.NewScroll(content))
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

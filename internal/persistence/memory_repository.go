@@ -30,7 +30,10 @@ func NewMemoryRepository() *MemoryRepository {
 func (r *MemoryRepository) UpsertHands(_ context.Context, hands []PersistedHand) (UpsertResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.upsertHandsLocked(hands), nil
+}
 
+func (r *MemoryRepository) upsertHandsLocked(hands []PersistedHand) UpsertResult {
 	res := UpsertResult{}
 	for _, ph := range hands {
 		if ph.Hand == nil {
@@ -48,7 +51,7 @@ func (r *MemoryRepository) UpsertHands(_ context.Context, hands []PersistedHand)
 		}
 		r.hands[uid] = inMemoryEntry{hand: cloneHand(ph.Hand), source: ph.Source}
 	}
-	return res, nil
+	return res
 }
 
 func (r *MemoryRepository) ListHands(_ context.Context, f HandFilter) ([]*parser.Hand, error) {
@@ -114,6 +117,18 @@ func (r *MemoryRepository) SaveCursor(_ context.Context, c ImportCursor) error {
 	}
 	r.cursors[c.SourcePath] = c
 	return nil
+}
+
+func (r *MemoryRepository) SaveImportBatch(_ context.Context, hands []PersistedHand, c ImportCursor) (UpsertResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	res := r.upsertHandsLocked(hands)
+	if c.UpdatedAt.IsZero() {
+		c.UpdatedAt = time.Now()
+	}
+	r.cursors[c.SourcePath] = c
+	return res, nil
 }
 
 func cloneHand(h *parser.Hand) *parser.Hand {
