@@ -20,6 +20,12 @@ func NewSQLiteRepository(dbPath string) (*SQLiteRepository, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	// WAL mode reduces write latency by avoiding full fsync on every commit.
+	// synchronous=NORMAL is safe with WAL and significantly faster than the default FULL.
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set sqlite pragmas: %w", err)
+	}
 	repo := &SQLiteRepository{db: db}
 	if err := runMigrations(db); err != nil {
 		_ = db.Close()
