@@ -2,7 +2,7 @@ package ui
 
 import (
 	"embed"
-	"log"
+	"log/slog"
 
 	"fyne.io/fyne/v2/lang"
 )
@@ -12,6 +12,6 @@ var translationsFS embed.FS
 
 func init() {
 	if err := lang.AddTranslationsFS(translationsFS, "translations"); err != nil {
-		log.Printf("failed to load translations: %v", err)
+		slog.Error("failed to load translations", "error", err)
 	}
 }

@@ -3,6 +3,7 @@ package watcher
 import (
 	"bufio"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,6 +44,7 @@ func NewLogWatcher(logPath string) (*LogWatcher, error) {
 
 // Start begins watching for file changes
 func (lw *LogWatcher) Start() error {
+	slog.Info("watcher starting", "path", lw.LogPath)
 	// Watch the directory (more reliable than watching file directly)
 	dir := filepath.Dir(lw.LogPath)
 	if err := lw.watcher.Add(dir); err != nil {
@@ -64,6 +66,7 @@ func (lw *LogWatcher) Start() error {
 // Stop stops the watcher
 func (lw *LogWatcher) Stop() {
 	lw.stopOnce.Do(func() {
+		slog.Info("watcher stopped", "path", lw.LogPath)
 		close(lw.done)
 		_ = lw.watcher.Close()
 	})
@@ -160,6 +163,7 @@ func (lw *LogWatcher) readNewContent() error {
 	}
 
 	if len(lines) > 0 && lw.OnNewData != nil {
+		slog.Debug("new data detected", "path", lw.LogPath, "lines", len(lines))
 		lw.OnNewData(lines, startOffset, endOffset)
 	}
 

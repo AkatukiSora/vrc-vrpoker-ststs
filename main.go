@@ -1,12 +1,14 @@
 package main
 
 import (
-	"fmt"
+	"flag"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/application"
+	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/applog"
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/persistence"
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/ui"
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/watcher"
@@ -19,10 +21,25 @@ var (
 )
 
 func main() {
+	debugFlag := flag.Bool("debug", false, "Enable debug logging")
+	flag.Parse()
+
+	debug := *debugFlag || os.Getenv("VRC_VRPOKER_DEBUG") == "1"
+	applog.Init(debug)
+
+	slog.Info("starting",
+		"version", version,
+		"commit", commit,
+		"buildDate", buildDate,
+		"debug", debug,
+	)
+
 	dbPath := resolveDBPath()
+	slog.Info("database", "path", dbPath)
+
 	repo, err := persistence.NewSQLiteRepository(dbPath)
 	if err != nil {
-		fmt.Printf("warning: failed to initialize sqlite repository: %v\n", err)
+		slog.Warn("sqlite init failed, falling back to memory", "error", err)
 		repo = nil
 	}
 
@@ -66,7 +83,7 @@ func resolveDBPath() string {
 
 	dir := filepath.Join(baseDir, appName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		fmt.Printf("warning: failed to create data directory %s: %v\n", dir, err)
+		slog.Warn("failed to create data directory", "dir", dir, "error", err)
 		return filepath.Join(".", dbFile)
 	}
 	return filepath.Join(dir, dbFile)

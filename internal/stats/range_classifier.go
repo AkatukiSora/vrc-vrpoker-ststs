@@ -276,3 +276,28 @@ func uniqueStrings(in []string) []string {
 	}
 	return out
 }
+
+// ClassifyMadeHand returns the made hand class for hole cards + community cards.
+// holeCards should be 2 cards; communityCards can be 0–5 cards.
+// Returns one of the AllMadeHandClasses() values.
+func ClassifyMadeHand(holeCards, communityCards []parser.Card) string {
+	cards := make([]parser.Card, 0, len(holeCards)+len(communityCards))
+	cards = append(cards, holeCards...)
+	cards = append(cards, communityCards...)
+	return madeHandClass(cards)
+}
+
+// AllMadeHandClasses returns the made hand class strings in rank order (weakest first).
+func AllMadeHandClasses() []string {
+	return []string{
+		handClassHighCard,
+		handClassOnePair,
+		handClassTwoPair,
+		handClassTrips,
+		handClassStraight,
+		handClassFlush,
+		handClassFullHouse,
+		handClassQuads,
+		handClassStraightFlush,
+	}
+}

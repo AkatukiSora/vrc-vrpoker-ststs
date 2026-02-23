@@ -142,54 +142,167 @@ func replaceViewContentPreservingLayout(root *fyne.Container, next fyne.CanvasOb
 
 type overviewTabView struct {
 	tabRoot
-	win        fyne.Window
-	visibility *MetricVisibilityState
+	win          fyne.Window
+	visibility   *MetricVisibilityState
+	filter       TabFilterState
+	allHands     []*parser.Hand
+	localSeat    int
+	calc         *stats.Calculator
+	cachedTrendN int
+	cachedLen    int
 }
 
 func newOverviewTabView(win fyne.Window, visibility *MetricVisibilityState) *overviewTabView {
-	return &overviewTabView{tabRoot: newTabRoot(), win: win, visibility: visibility}
+	return &overviewTabView{
+		tabRoot:      newTabRoot(),
+		win:          win,
+		visibility:   visibility,
+		filter:       TabFilterState{Mode: FilterModeTrend, NDays: 30, NMonths: 3, NHands: 500},
+		calc:         stats.NewCalculator(),
+		cachedTrendN: -1,
+	}
 }
 
-func (v *overviewTabView) Update(s *stats.Stats) {
-	replaceViewContentPreservingLayout(v.root, NewOverviewTab(s, v.visibility, v.win))
+func (v *overviewTabView) Update(hands []*parser.Hand, localSeat int) {
+	v.allHands = hands
+	v.localSeat = localSeat
+	v.rebuild()
+}
+
+func (v *overviewTabView) rebuild() {
+	filtered, trendN := filterHands(v.allHands, v.localSeat, &v.filter, &v.cachedTrendN, &v.cachedLen)
+	s := v.calc.Calculate(filtered, v.localSeat)
+	filterBar := buildFilterBar(&v.filter, trendN, func() {
+		v.cachedTrendN = -1
+		v.rebuild()
+	})
+	content := NewOverviewTab(s, v.visibility, v.win)
+	inner := container.NewBorder(filterBar, nil, nil, nil, content)
+	replaceViewContentPreservingLayout(v.root, inner)
 }
 
 type positionStatsTabView struct {
 	tabRoot
-	visibility *MetricVisibilityState
+	visibility   *MetricVisibilityState
+	filter       TabFilterState
+	allHands     []*parser.Hand
+	localSeat    int
+	calc         *stats.Calculator
+	cachedTrendN int
+	cachedLen    int
 }
 
 func newPositionStatsTabView(visibility *MetricVisibilityState) *positionStatsTabView {
-	return &positionStatsTabView{tabRoot: newTabRoot(), visibility: visibility}
+	return &positionStatsTabView{
+		tabRoot:      newTabRoot(),
+		visibility:   visibility,
+		filter:       TabFilterState{Mode: FilterModeTrend, NDays: 30, NMonths: 3, NHands: 500},
+		calc:         stats.NewCalculator(),
+		cachedTrendN: -1,
+	}
 }
 
-func (v *positionStatsTabView) Update(s *stats.Stats) {
-	replaceViewContentPreservingLayout(v.root, NewPositionStatsTab(s, v.visibility))
+func (v *positionStatsTabView) Update(hands []*parser.Hand, localSeat int) {
+	v.allHands = hands
+	v.localSeat = localSeat
+	v.rebuild()
+}
+
+func (v *positionStatsTabView) rebuild() {
+	filtered, trendN := filterHands(v.allHands, v.localSeat, &v.filter, &v.cachedTrendN, &v.cachedLen)
+	s := v.calc.Calculate(filtered, v.localSeat)
+	filterBar := buildFilterBar(&v.filter, trendN, func() {
+		v.cachedTrendN = -1
+		v.rebuild()
+	})
+	content := NewPositionStatsTab(s, v.visibility)
+	inner := container.NewBorder(filterBar, nil, nil, nil, content)
+	replaceViewContentPreservingLayout(v.root, inner)
 }
 
 type handRangeTabView struct {
 	tabRoot
-	win   fyne.Window
-	state *HandRangeViewState
+	win          fyne.Window
+	state        *HandRangeViewState
+	filter       TabFilterState
+	allHands     []*parser.Hand
+	localSeat    int
+	calc         *stats.Calculator
+	cachedTrendN int
+	cachedLen    int
 }
 
 func newHandRangeTabView(win fyne.Window, state *HandRangeViewState) *handRangeTabView {
-	return &handRangeTabView{tabRoot: newTabRoot(), win: win, state: state}
+	return &handRangeTabView{
+		tabRoot:      newTabRoot(),
+		win:          win,
+		state:        state,
+		filter:       TabFilterState{Mode: FilterModeTrend, NDays: 30, NMonths: 3, NHands: 500},
+		calc:         stats.NewCalculator(),
+		cachedTrendN: -1,
+	}
 }
 
-func (v *handRangeTabView) Update(s *stats.Stats) {
-	replaceViewContentPreservingLayout(v.root, NewHandRangeTab(s, v.win, v.state))
+func (v *handRangeTabView) Update(hands []*parser.Hand, localSeat int) {
+	v.allHands = hands
+	v.localSeat = localSeat
+	v.rebuild()
+}
+
+func (v *handRangeTabView) rebuild() {
+	filtered, trendN := filterHands(v.allHands, v.localSeat, &v.filter, &v.cachedTrendN, &v.cachedLen)
+	s := v.calc.Calculate(filtered, v.localSeat)
+	filterBar := buildFilterBar(&v.filter, trendN, func() {
+		v.cachedTrendN = -1
+		v.rebuild()
+	})
+	content := NewHandRangeTab(s, v.win, v.state)
+	inner := container.NewBorder(filterBar, nil, nil, nil, content)
+	replaceViewContentPreservingLayout(v.root, inner)
 }
 
 type handHistoryTabView struct {
 	tabRoot
-	state *HandHistoryViewState
+	state        *HandHistoryViewState
+	tabFilter    TabFilterState
+	handFilter   HandHistoryFilterState
+	allHands     []*parser.Hand
+	localSeat    int
+	cachedTrendN int
+	cachedLen    int
 }
 
 func newHandHistoryTabView(state *HandHistoryViewState) *handHistoryTabView {
-	return &handHistoryTabView{tabRoot: newTabRoot(), state: state}
+	return &handHistoryTabView{
+		tabRoot:      newTabRoot(),
+		state:        state,
+		tabFilter:    TabFilterState{Mode: FilterModeAll, NDays: 30, NMonths: 3, NHands: 500},
+		cachedTrendN: -1,
+	}
 }
 
 func (v *handHistoryTabView) Update(hands []*parser.Hand, localSeat int) {
-	replaceViewContentPreservingLayout(v.root, NewHandHistoryTab(hands, localSeat, v.state))
+	v.allHands = hands
+	v.localSeat = localSeat
+	v.rebuild()
+}
+
+func (v *handHistoryTabView) rebuild() {
+	filtered, trendN := filterHands(v.allHands, v.localSeat, &v.tabFilter, &v.cachedTrendN, &v.cachedLen)
+	total := len(filtered)
+	filtered = applyHandHistoryFilter(filtered, v.localSeat, &v.handFilter)
+	panel := buildHandHistoryFilterPanel(
+		&v.tabFilter,
+		&v.handFilter,
+		trendN,
+		total,
+		len(filtered),
+		func() {
+			v.cachedTrendN = -1
+			v.rebuild()
+		},
+	)
+	content := NewHandHistoryTab(filtered, v.localSeat, v.state)
+	inner := container.NewBorder(panel, nil, nil, nil, content)
+	replaceViewContentPreservingLayout(v.root, inner)
 }

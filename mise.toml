@@ -84,6 +84,11 @@ description = "Build and run (Wayland)"
 depends = ["build"]
 run = './"$BINARY"'
 
+[tasks.run-debug]
+description = "Build and run with debug logging enabled"
+depends = ["build-debug"]
+run = './"${BINARY}-debug" --debug'
+
 [tasks.test]
 description = "Run unit tests (parser/stats/watcher only; UI has no tests)"
 run = 'go test -v -run "Test[^R]" ./internal/parser/... ./internal/stats/... ./internal/watcher/...'
