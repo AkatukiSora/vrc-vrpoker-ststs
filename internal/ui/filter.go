@@ -403,21 +403,30 @@ func newDateEntry(initial time.Time, onChange func(time.Time)) *commitEntry {
 		entry.SetText(initial.Format("2006-01-02"))
 	}
 
+	committing := false // re-entry guard: SetText inside commit must not re-trigger commit
+
 	commit := func(s string) {
+		if committing {
+			return
+		}
 		for _, layout := range []string{"2006-01-02", "20060102"} {
 			if t, err := time.Parse(layout, s); err == nil {
 				lastValid = t
+				committing = true
 				entry.SetText(t.Format("2006-01-02")) // normalize
+				committing = false
 				onChange(t)
 				return
 			}
 		}
 		// Invalid: reset to last valid
+		committing = true
 		if !lastValid.IsZero() {
 			entry.SetText(lastValid.Format("2006-01-02"))
 		} else {
 			entry.SetText("")
 		}
+		committing = false
 	}
 	entry.onCommit = commit
 	entry.OnSubmitted = commit
