@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/application"
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/persistence"
@@ -17,7 +19,7 @@ var (
 )
 
 func main() {
-	dbPath := filepath.Join(".", "vrpoker-stats.db")
+	dbPath := resolveDBPath()
 	repo, err := persistence.NewSQLiteRepository(dbPath)
 	if err != nil {
 		fmt.Printf("warning: failed to initialize sqlite repository: %v\n", err)
@@ -31,9 +33,71 @@ func main() {
 		RepositoryURL: "https://github.com/AkatukiSora/vrc-vrpoker-stats",
 	}
 	if repo != nil {
-		ui.Run(application.NewService(repo, watcher.DetectAllLogFiles), meta)
+		ui.Run(application.NewService(repo, watcher.DetectAllLogFiles), meta, dbPath)
 		return
 	}
 
-	ui.Run(application.NewService(persistence.NewMemoryRepository(), watcher.DetectAllLogFiles), meta)
+	ui.Run(application.NewService(persistence.NewMemoryRepository(), watcher.DetectAllLogFiles), meta, "")
+}
+
+// resolveDBPath returns the OS-appropriate path for the SQLite database:
+//
+//	Linux:   $XDG_DATA_HOME/vrc-vrpoker-ststs/vrpoker-stats.db
+//	         (defaults to ~/.local/share/vrc-vrpoker-ststs/)
+//	Windows: %LOCALAPPDATA%\vrc-vrpoker-ststs\vrpoker-stats.db
+//	macOS:   ~/Library/Application Support/vrc-vrpoker-ststs/vrpoker-stats.db
+//
+// Falls back to ~/.vrc-vrpoker-ststs/ if the primary location is unavailable,
+// then to the current directory as a last resort.
+func resolveDBPath() string {
+	const appName = "vrc-vrpoker-ststs"
+	const dbFile = "vrpoker-stats.db"
+
+	baseDir := userDataDir()
+	if baseDir == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir := filepath.Join(home, "."+appName)
+			if err := os.MkdirAll(dir, 0o755); err == nil {
+				return filepath.Join(dir, dbFile)
+			}
+		}
+		return filepath.Join(".", dbFile)
+	}
+
+	dir := filepath.Join(baseDir, appName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		fmt.Printf("warning: failed to create data directory %s: %v\n", dir, err)
+		return filepath.Join(".", dbFile)
+	}
+	return filepath.Join(dir, dbFile)
+}
+
+// userDataDir returns the OS-specific base directory for persistent user data.
+//
+//	Linux:   $XDG_DATA_HOME, or ~/.local/share if unset
+//	Windows: %LOCALAPPDATA%
+//	macOS:   ~/Library/Application Support
+func userDataDir() string {
+	switch runtime.GOOS {
+	case "windows":
+		if dir := os.Getenv("LOCALAPPDATA"); dir != "" {
+			return dir
+		}
+		// Fallback: derive from USERPROFILE
+		if profile := os.Getenv("USERPROFILE"); profile != "" {
+			return filepath.Join(profile, "AppData", "Local")
+		}
+	case "darwin":
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, "Library", "Application Support")
+		}
+	default: // Linux and other Unix-like
+		if dir := os.Getenv("XDG_DATA_HOME"); dir != "" {
+			return dir
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, ".local", "share")
+		}
+	}
+	return ""
 }
