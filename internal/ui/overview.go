@@ -107,8 +107,13 @@ func overviewInsightCard(in trendInsight) fyne.CanvasObject {
 	if len(in.Evidence) > 0 {
 		evidenceRows := make([]fyne.CanvasObject, 0, len(in.Evidence))
 		for _, ev := range in.Evidence {
-			evLabel := widget.NewLabel("- " + ev)
+			evLabel := widget.NewLabel("- " + ev.Text)
 			evLabel.Wrapping = fyne.TextWrapWord
+			if ev.IsGood {
+				evLabel.Importance = widget.SuccessImportance
+			} else {
+				evLabel.Importance = widget.WarningImportance
+			}
 			evidenceRows = append(evidenceRows, evLabel)
 		}
 		rows = append(rows, widget.NewAccordion(
