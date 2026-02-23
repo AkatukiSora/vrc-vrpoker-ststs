@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"image/color"
+	"log/slog"
 	"os"
 	"sync"
 
@@ -16,7 +17,6 @@ import (
 
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/application"
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/parser"
-	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/stats"
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/watcher"
 )
 
@@ -54,7 +54,6 @@ type App struct {
 	closeOnce       sync.Once
 	isShuttingDown  bool
 	mu              sync.Mutex
-	lastStats       *stats.Stats
 	lastHands       []*parser.Hand
 	lastLocalSeat   int
 	rangeState      *HandRangeViewState
@@ -269,14 +268,17 @@ func (a *App) rebuildNavigation() {
 }
 
 func (a *App) initLogFile() {
+	slog.Info("bootstrapping log import")
 	a.doSetStatus(lang.X("app.status.importing", "Importing VRChat logs..."))
 
 	logPath, err := a.service.BootstrapImportAllLogs(a.ctx)
 	if err != nil {
+		slog.Error("no log file found during bootstrap", "error", err)
 		a.doSetStatus(lang.X("app.error.no_log_file", "No log file found: {{.Error}} — configure in Settings.", map[string]any{"Error": err}))
 		return
 	}
 
+	slog.Info("bootstrap complete", "logPath", logPath)
 	a.doUpdateStats()
 	a.requestLogFileChange(logPath)
 }
@@ -342,13 +344,16 @@ func (a *App) changeLogFile(path string) {
 	a.watcher = nil
 	a.mu.Unlock()
 	if prevWatcher != nil {
+		slog.Info("stopping previous watcher")
 		prevWatcher.Stop()
 	}
 
+	slog.Info("changing log file", "path", path)
 	a.doSetStatus(lang.X("app.status.loading", "Loading: {{.Path}}", map[string]any{"Path": shortPath(path)}))
 
 	// Parse entire existing file first
 	if err := a.service.ChangeLogFile(a.ctx, path); err != nil {
+		slog.Error("failed to read log file", "path", path, "error", err)
 		a.doSetStatus(lang.X("app.error.read_log", "Error reading log: {{.Error}}", map[string]any{"Error": err}))
 		return
 	}
@@ -358,11 +363,13 @@ func (a *App) changeLogFile(path string) {
 	a.mu.Unlock()
 
 	a.doUpdateStats()
+	slog.Info("log file loaded", "path", path)
 	a.doSetStatus(lang.X("app.status.loaded", "Loaded: {{.Path}} — watching for changes…", map[string]any{"Path": shortPath(path)}))
 
 	// Start tail watcher from current end-of-file
 	w, err := watcher.NewLogWatcher(path)
 	if err != nil {
+		slog.Error("watcher creation failed", "path", path, "error", err)
 		a.doSetStatus(lang.X("app.error.watcher", "Watcher error: {{.Error}}", map[string]any{"Error": err}))
 		return
 	}
@@ -372,6 +379,7 @@ func (a *App) changeLogFile(path string) {
 			return
 		}
 		if err := a.service.ImportLines(a.ctx, path, lines, startOffset, endOffset); err != nil {
+			slog.Error("import error", "path", path, "error", err)
 			a.doSetStatus(lang.X("app.error.import", "Import error: {{.Error}}", map[string]any{"Error": err}))
 			return
 		}
@@ -384,12 +392,14 @@ func (a *App) changeLogFile(path string) {
 		if !a.isCurrentWatcherGeneration(gen) {
 			return
 		}
+		slog.Info("new log file detected", "path", nextPath)
 		a.requestLogFileChange(nextPath)
 	}
 	w.OnError = func(err error) {
 		if !a.isCurrentWatcherGeneration(gen) {
 			return
 		}
+		slog.Error("watcher error", "path", path, "error", err)
 		a.doSetStatus(lang.X("app.error.watcher", "Watcher error: {{.Error}}", map[string]any{"Error": err}))
 	}
 
@@ -401,9 +411,11 @@ func (a *App) changeLogFile(path string) {
 	}
 
 	if err := w.Start(); err != nil {
+		slog.Error("watcher start failed", "path", path, "error", err)
 		a.doSetStatus(lang.X("app.error.watcher_start", "Failed to start watcher: {{.Error}}", map[string]any{"Error": err}))
 		return
 	}
+	slog.Info("watcher started", "path", path)
 
 	a.mu.Lock()
 	if a.watcherGen == gen && !a.isShuttingDown {
@@ -422,6 +434,7 @@ func (a *App) isCurrentWatcherGeneration(gen uint64) bool {
 
 func (a *App) shutdown() {
 	a.closeOnce.Do(func() {
+		slog.Info("shutting down")
 		a.mu.Lock()
 		a.isShuttingDown = true
 		a.watcherGen++
@@ -457,14 +470,16 @@ func (a *App) doResetDB() {
 }
 
 func (a *App) doUpdateStats() {
-	s, hands, localSeat, err := a.service.Snapshot(a.ctx)
+	_, hands, localSeat, err := a.service.Snapshot(a.ctx)
 	if err != nil {
+		slog.Error("snapshot failed", "error", err)
 		a.doSetStatus(lang.X("app.error.snapshot", "Snapshot error: {{.Error}}", map[string]any{"Error": err}))
 		return
 	}
 
+	slog.Info("snapshot complete", "hands", len(hands), "localSeat", localSeat)
+
 	a.mu.Lock()
-	a.lastStats = s
 	a.lastHands = hands
 	a.lastLocalSeat = localSeat
 	a.mu.Unlock()
@@ -485,7 +500,6 @@ func (a *App) doRefreshCurrentTab() {
 	}
 
 	a.mu.Lock()
-	s := a.lastStats
 	localSeat := a.lastLocalSeat
 	hands := a.lastHands
 	path := a.logPath
@@ -497,19 +511,19 @@ func (a *App) doRefreshCurrentTab() {
 		if a.overviewView == nil {
 			a.overviewView = newOverviewTabView(a.win, a.metricState)
 		}
-		a.overviewView.Update(s)
+		a.overviewView.Update(hands, localSeat)
 		obj = a.overviewView.CanvasObject()
 	case tabPositionStats:
 		if a.positionView == nil {
 			a.positionView = newPositionStatsTabView(a.metricState)
 		}
-		a.positionView.Update(s)
+		a.positionView.Update(hands, localSeat)
 		obj = a.positionView.CanvasObject()
 	case tabHandRange:
 		if a.handRangeView == nil {
 			a.handRangeView = newHandRangeTabView(a.win, a.rangeState)
 		}
-		a.handRangeView.Update(s)
+		a.handRangeView.Update(hands, localSeat)
 		obj = a.handRangeView.CanvasObject()
 	case tabHandHistory:
 		if a.handHistoryView == nil {
@@ -541,7 +555,11 @@ func (a *App) doRefreshCurrentTab() {
 		}
 		obj = a.settingsTab
 	default:
-		obj = NewOverviewTab(s, a.metricState, a.win)
+		if a.overviewView == nil {
+			a.overviewView = newOverviewTabView(a.win, a.metricState)
+		}
+		a.overviewView.Update(hands, localSeat)
+		obj = a.overviewView.CanvasObject()
 	}
 
 	a.mainContent.Objects = []fyne.CanvasObject{obj}

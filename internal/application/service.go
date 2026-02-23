@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"regexp"
 	"sync"
@@ -75,6 +76,8 @@ func (s *Service) BootstrapImportAllLogs(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("no log files found")
 	}
 
+	slog.Info("bootstrapping log import", "files", len(paths))
+
 	// DetectAllLogFiles returns newest first. Import oldest -> newest.
 	reversed := make([]string, len(paths))
 	for i := range paths {
@@ -88,6 +91,7 @@ func (s *Service) BootstrapImportAllLogs(ctx context.Context) (string, error) {
 		}
 	}
 
+	slog.Info("bootstrap import complete", "files", len(paths))
 	return paths[0], nil
 }
 
@@ -96,6 +100,7 @@ func (s *Service) ChangeLogFile(ctx context.Context, path string) error {
 }
 
 func (s *Service) importFile(ctx context.Context, path string, activate bool) error {
+	slog.Debug("importing file", "path", path, "activate", activate)
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -154,6 +159,7 @@ func (s *Service) importFile(ctx context.Context, path string, activate bool) er
 		s.mu.Unlock()
 	}
 
+	slog.Debug("file import complete", "path", path, "hands", parsedHands)
 	return nil
 }
 
@@ -271,6 +277,7 @@ func (s *Service) Snapshot(ctx context.Context) (*stats.Stats, []*parser.Hand, i
 		return nil, nil, localSeat, err
 	}
 
+	slog.Debug("snapshot", "hands", len(hands), "localSeat", localSeat)
 	calculated := calc.Calculate(hands, localSeat)
 	return calculated, hands, localSeat, nil
 }

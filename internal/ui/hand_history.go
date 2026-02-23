@@ -15,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/parser"
+	"github.com/AkatukiSora/vrc-vrpoker-ststs/internal/stats"
 )
 
 // suitSymbol returns the unicode suit symbol for a card suit letter.
@@ -283,6 +284,13 @@ func signedChips(v int) string {
 
 type HandHistoryViewState struct {
 	SelectedHandKey string
+}
+
+// HandHistoryFilterState holds preflop pocket-hand and river hand-class filters.
+// Empty slices mean "no filter" (show all).
+type HandHistoryFilterState struct {
+	PocketCategories []stats.PocketCategory
+	RiverHandClasses []string
 }
 
 type handOutcomeSummary struct {
@@ -629,6 +637,215 @@ func buildDetailPanel(h *parser.Hand, localSeat int) fyne.CanvasObject {
 	content := container.NewVBox(sections...)
 
 	return container.NewScroll(container.NewPadded(content))
+}
+
+// applyHandHistoryFilter filters hands by pocket category and/or river hand class.
+// Both filters are OR-within-category (any selected pocket cat matches, any selected river class matches).
+// If both filters are non-empty, a hand must match BOTH.
+func applyHandHistoryFilter(hands []*parser.Hand, localSeat int, f *HandHistoryFilterState) []*parser.Hand {
+	if f == nil || (len(f.PocketCategories) == 0 && len(f.RiverHandClasses) == 0) {
+		return hands
+	}
+	out := hands[:0:0]
+	for _, h := range hands {
+		if h == nil {
+			continue
+		}
+		seat := localSeatForHand(h, localSeat)
+		pi, ok := h.Players[seat]
+		if !ok || pi == nil {
+			continue
+		}
+
+		// Pocket filter
+		if len(f.PocketCategories) > 0 {
+			if len(pi.HoleCards) != 2 {
+				continue
+			}
+			cats := stats.ClassifyPocketHand(pi.HoleCards[0], pi.HoleCards[1])
+			matched := false
+			for _, wantCat := range f.PocketCategories {
+				for _, c := range cats {
+					if c == wantCat {
+						matched = true
+						break
+					}
+				}
+				if matched {
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		// River hand class filter
+		if len(f.RiverHandClasses) > 0 {
+			if len(h.CommunityCards) < 5 || len(pi.HoleCards) != 2 {
+				continue
+			}
+			riverClass := stats.ClassifyMadeHand(pi.HoleCards, h.CommunityCards)
+			matched := false
+			for _, wantClass := range f.RiverHandClasses {
+				if riverClass == wantClass {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		out = append(out, h)
+	}
+	return out
+}
+
+// buildHandHistoryFilterPanel builds the combined period+hand filter panel for hand history.
+func buildHandHistoryFilterPanel(
+	tabFilter *TabFilterState,
+	handFilter *HandHistoryFilterState,
+	trendN int,
+	total int,
+	filtered int,
+	onChange func(),
+) fyne.CanvasObject {
+	// Period filter bar
+	filterBar := buildFilterBar(tabFilter, trendN, onChange)
+
+	// Showing count label
+	showingLabel := widget.NewLabel(lang.X("hand_history.filter.showing",
+		"Showing {{.N}} / {{.Total}} hands",
+		map[string]any{"N": filtered, "Total": total}))
+
+	topRow := container.NewHBox(filterBar, showingLabel)
+
+	if handFilter == nil {
+		return topRow
+	}
+
+	// -- Pocket Hand checkboxes --
+	pocketCats := stats.AllPocketCategories()
+	selectedPocket := make(map[stats.PocketCategory]bool, len(handFilter.PocketCategories))
+	for _, c := range handFilter.PocketCategories {
+		selectedPocket[c] = true
+	}
+
+	pocketChecks := make([]fyne.CanvasObject, 0, len(pocketCats))
+	for _, cat := range pocketCats {
+		cat := cat
+		label := lang.X("pocket."+pocketI18nKey(cat), stats.PocketCategoryLabel(cat)) //i18n:ignore poker category labels are already translated via key
+		check := widget.NewCheck(label, func(checked bool) {
+			if checked {
+				selectedPocket[cat] = true
+			} else {
+				delete(selectedPocket, cat)
+			}
+			handFilter.PocketCategories = handFilter.PocketCategories[:0]
+			for _, c := range pocketCats {
+				if selectedPocket[c] {
+					handFilter.PocketCategories = append(handFilter.PocketCategories, c)
+				}
+			}
+			onChange()
+		})
+		check.Checked = selectedPocket[cat]
+		pocketChecks = append(pocketChecks, check)
+	}
+	pocketGrid := container.NewGridWithColumns(3, pocketChecks...)
+
+	// -- River Hand Class checkboxes --
+	riverClasses := stats.AllMadeHandClasses()
+	selectedRiver := make(map[string]bool, len(handFilter.RiverHandClasses))
+	for _, c := range handFilter.RiverHandClasses {
+		selectedRiver[c] = true
+	}
+
+	riverChecks := make([]fyne.CanvasObject, 0, len(riverClasses))
+	for _, cls := range riverClasses {
+		cls := cls
+		label := lang.X("river."+riverI18nKey(cls), cls) //i18n:ignore river hand class labels are already translated via key
+		check := widget.NewCheck(label, func(checked bool) {
+			if checked {
+				selectedRiver[cls] = true
+			} else {
+				delete(selectedRiver, cls)
+			}
+			handFilter.RiverHandClasses = handFilter.RiverHandClasses[:0]
+			for _, c := range riverClasses {
+				if selectedRiver[c] {
+					handFilter.RiverHandClasses = append(handFilter.RiverHandClasses, c)
+				}
+			}
+			onChange()
+		})
+		check.Checked = selectedRiver[cls]
+		riverChecks = append(riverChecks, check)
+	}
+	riverGrid := container.NewGridWithColumns(3, riverChecks...)
+
+	acc := widget.NewAccordion(
+		widget.NewAccordionItem(lang.X("hand_history.filter.pocket.title", "Pocket Hand"), pocketGrid),
+		widget.NewAccordionItem(lang.X("hand_history.filter.river.title", "River Hand"), riverGrid),
+	)
+
+	return container.NewVBox(topRow, acc)
+}
+
+// pocketI18nKey converts a PocketCategory to its i18n key suffix.
+func pocketI18nKey(c stats.PocketCategory) string {
+	switch c {
+	case stats.PocketPremium:
+		return "premium"
+	case stats.PocketSecondPremium:
+		return "second_premium"
+	case stats.PocketPair:
+		return "pair"
+	case stats.PocketSuitedConnector:
+		return "suited_connector"
+	case stats.PocketSuitedOneGapper:
+		return "suited_one_gapper"
+	case stats.PocketSuited:
+		return "suited"
+	case stats.PocketAx:
+		return "ax"
+	case stats.PocketKx:
+		return "kx"
+	case stats.PocketBroadwayOffsuit:
+		return "broadway_offsuit"
+	case stats.PocketConnector:
+		return "connector"
+	default:
+		return ""
+	}
+}
+
+// riverI18nKey converts a hand class string to its i18n key suffix.
+func riverI18nKey(cls string) string {
+	switch cls {
+	case "High Card":
+		return "high_card"
+	case "One Pair":
+		return "one_pair"
+	case "Two Pair":
+		return "two_pair"
+	case "Trips":
+		return "trips"
+	case "Straight":
+		return "straight"
+	case "Flush":
+		return "flush"
+	case "Full House":
+		return "full_house"
+	case "Quads":
+		return "quads"
+	case "Straight Flush":
+		return "straight_flush"
+	default:
+		return ""
+	}
 }
 
 // NewHandHistoryTab creates the "Hand History" tab canvas object.
