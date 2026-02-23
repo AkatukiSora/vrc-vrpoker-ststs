@@ -13,8 +13,10 @@ import (
 
 type SettingsTab struct {
 	logPath         string
+	dbPath          string
 	onPathChange    func(string)
 	onMetricsChange func()
+	onReset         func()
 	metricState     *MetricVisibilityState
 	metadata        AppMetadata
 	win             fyne.Window
@@ -27,14 +29,18 @@ func NewSettingsTab(
 	metricState *MetricVisibilityState,
 	metadata AppMetadata,
 	onMetricsChange func(),
+	dbPath string,
+	onReset func(),
 ) fyne.CanvasObject {
 	if metricState == nil {
 		metricState = NewMetricVisibilityState()
 	}
 	st := &SettingsTab{
 		logPath:         currentPath,
+		dbPath:          dbPath,
 		onPathChange:    onPathChange,
 		onMetricsChange: onMetricsChange,
+		onReset:         onReset,
 		metricState:     metricState,
 		metadata:        metadata,
 		win:             win,
@@ -173,6 +179,31 @@ func (st *SettingsTab) buildMetricsSection() fyne.CanvasObject {
 	return newSectionCard(container.NewVBox(metricsHint, presetRow, groups))
 }
 
+func (st *SettingsTab) buildDataManagementSection() fyne.CanvasObject {
+	dbPathHint := widget.NewLabel(lang.X("settings.data.db_path_label", "Database File:"))
+	dbPathValue := widget.NewLabel(st.dbPath)
+	dbPathValue.Wrapping = fyne.TextWrapBreak
+
+	resetBtn := widget.NewButton(lang.X("settings.data.reset_button", "Reset Database"), func() {
+		dialog.ShowConfirm(
+			lang.X("settings.data.reset_confirm_title", "Reset Database?"),
+			lang.X("settings.data.reset_confirm_body", "All recorded hands and statistics will be permanently deleted.\n\nAfter the reset, the application will restart and re-import hands from any VRChat log files that are still present on disk. Hands from log files that have already been deleted or rotated away will be lost.\n\nThis action cannot be undone."),
+			func(ok bool) {
+				if !ok {
+					return
+				}
+				if st.onReset != nil {
+					st.onReset()
+				}
+			},
+			st.win,
+		)
+	})
+	resetBtn.Importance = widget.DangerImportance
+
+	return newSectionCard(container.NewVBox(dbPathHint, dbPathValue, resetBtn))
+}
+
 func (st *SettingsTab) buildAboutSection() fyne.CanvasObject {
 	version := st.metadata.Version
 	if version == "" {
@@ -217,6 +248,7 @@ func (st *SettingsTab) build() fyne.CanvasObject {
 	sections := widget.NewAccordion(
 		widget.NewAccordionItem(lang.X("settings.section.log_source", "Log Source"), st.buildLogSourceSection()),
 		widget.NewAccordionItem(lang.X("settings.section.metrics", "Metrics"), st.buildMetricsSection()),
+		widget.NewAccordionItem(lang.X("settings.section.data_management", "Data Management"), st.buildDataManagementSection()),
 	)
 	for _, item := range sections.Items {
 		item.Open = false

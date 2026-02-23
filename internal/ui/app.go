@@ -44,6 +44,7 @@ type App struct {
 	fyneApp         fyne.App
 	win             fyne.Window
 	logPath         string
+	dbPath          string
 	service         application.AppService
 	watcher         *watcher.LogWatcher
 	watcherGen      uint64
@@ -77,7 +78,7 @@ type App struct {
 }
 
 // Run starts the application
-func Run(service application.AppService, metadata AppMetadata) {
+func Run(service application.AppService, metadata AppMetadata, dbPath string) {
 	if service == nil {
 		return
 	}
@@ -96,6 +97,7 @@ func Run(service application.AppService, metadata AppMetadata) {
 		cancel:       cancel,
 		fyneApp:      a,
 		win:          win,
+		dbPath:       dbPath,
 		service:      service,
 		rangeState:   &HandRangeViewState{},
 		historyState: &HandHistoryViewState{},
@@ -444,7 +446,16 @@ func (a *App) shutdown() {
 	})
 }
 
-// doUpdateStats recalculates stats and schedules a UI refresh on the main thread.
+// doResetDB shuts down the app, deletes the database file, and restarts the process.
+func (a *App) doResetDB() {
+	a.shutdown()
+	if a.dbPath != "" {
+		_ = os.Remove(a.dbPath)
+	}
+	restartSelf()
+	a.fyneApp.Quit()
+}
+
 func (a *App) doUpdateStats() {
 	s, hands, localSeat, err := a.service.Snapshot(a.ctx)
 	if err != nil {
@@ -508,6 +519,7 @@ func (a *App) doRefreshCurrentTab() {
 		obj = a.handHistoryView.CanvasObject()
 	case tabSettings:
 		if a.settingsTab == nil || a.settingsPath != path {
+			dbPath := a.dbPath
 			a.settingsTab = NewSettingsTab(
 				path,
 				a.win,
@@ -522,6 +534,8 @@ func (a *App) doRefreshCurrentTab() {
 						a.doRefreshCurrentTab()
 					}
 				},
+				dbPath,
+				func() { a.doResetDB() },
 			)
 			a.settingsPath = path
 		}
