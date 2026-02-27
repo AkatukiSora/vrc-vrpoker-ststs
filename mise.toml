@@ -1,6 +1,7 @@
 [tools]
 go = "1.25.0"
 lefthook = "2.1.1"
+"go:github.com/asiermarques/adrgen" = "v0.4.1-beta"
 
 [env]
 BINARY = "vrpoker-stats"
@@ -116,6 +117,14 @@ run = "go run ./tools/check_i18n"
 [tasks.clean]
 description = "Remove build artifacts"
 run = 'rm -f "$BINARY" "${BINARY}-debug"'
+
+[tasks.adr-list]
+description = "List ADRs with status"
+run = "adrgen list"
+
+[tasks.adr-new]
+description = "Create a new ADR (mise run adr-new -- \"Title\")"
+run = 'adrgen create "$@"'
 
 [tasks.setup]
 description = "Set up development environment (install lefthook, tidy modules)"

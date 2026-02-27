@@ -144,6 +144,15 @@ If these appear later, they override guidance here.
 5. Run `go test ./...` when practical.
 6. Summarize behavior impact, risks, and follow-up work.
 
+## Architecture Decision Records (ADR)
+
+- ADR は `docs/adr/*.md` に格納
+- 全体把握: `mise run adr-list` でステータス一覧を取得
+- 新規 ADR: `adrgen create "タイトル"` で作成（`docs/adr/` に採番）
+- 置き換え: `adrgen create "新タイトル" -s <旧ADR番号>` で関係を記録
+- ステータス変更: `adrgen status <ID> accepted` 等
+- 詳細は `docs/adr/README.md`
+
 ## Commit Hygiene
 
 - Keep commits logically grouped by concern.
