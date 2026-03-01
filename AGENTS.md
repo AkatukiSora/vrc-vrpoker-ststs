@@ -135,6 +135,81 @@ If these appear later, they override guidance here.
 - Prefer table-driven tests for classification/opportunity logic.
 - Validate edge cases: missing blinds, seat changes, partial logs.
 
+### Stats Package: Boundary Value Testing Strategy
+
+The `internal/stats` package implements pure calculation logic for poker statistics. All tests are in `*_test.go` files:
+
+**Test Coverage:**
+- `calculator_test.go`: Bucket classification functions (16 boundary tests + 6 summary tests)
+- `accumulator_test.go`: Metric accumulation and aggregation (13 tests)
+- `incremental_test.go`: Incremental calculator state management (11 tests)
+
+**Key Boundary Value Tests (calculator_test.go):**
+
+**`TestBucketByBBMultiple`** (16 subtests)
+- Tests stack size classification by BB multiple
+- Boundaries: 2.5x, 4.0x, 6.0x, 10.0x
+- Coverage:
+  - At-boundary: exactly 50, 80, 120, 200 (for BB=20)
+  - Just-below: 49, 78, 118, 198 (float division cases)
+  - Just-above: 51, 82, 122, 202
+  - Extremes: 0 (lower), 2000 (upper)
+  - Zero BB edge case
+- Validates correct bucket assignment: BetSmall → BetHalf → BetTwoThird → BetPot → BetOver
+
+**`TestBucketByPotFraction`** (15 subtests)
+- Tests bet size classification by pot fraction
+- Boundaries: 0.38, 0.58, 0.78, 1.15
+- Coverage:
+  - At-boundary: exact fractions (38/100, 58/100, 78/100, 115/100)
+  - Just-below: 37/100, 57/100, 77/100, 114/100
+  - Just-above: 39/100, 59/100, 79/100, 116/100
+  - Extremes: 0 (lower), 1000/100 (upper)
+  - Zero pot edge case
+- Validates bet size bucketing for strategy analysis
+
+**`TestPreflopRangeActionSummary`** (6 subtests)
+- Tests preflop action categorization
+- Boundary conditions:
+  - Nil player
+  - Empty actions list
+  - Actions on specific streets only (Preflop only, non-Preflop)
+- Ensures only Preflop street actions are considered
+
+**`TestOverallActionSummary`** (6 subtests)
+- Tests post-flop action classification (last action on any street)
+- Boundary conditions:
+  - Nil player
+  - Empty actions list
+  - Actions on Showdown street (verified to be counted)
+  - Single action of each type: Fold, Check, Call
+- Maps to RangeActionBucket for aggregate statistics
+
+**`TestNewHandRangeTable`** (3 logical validations)
+- Tests 13×13 preflop hand matrix initialization
+- Validates:
+  - Grid completeness (169 cells)
+  - Diagonal (paired hands: AA, KK, ..., 22)
+  - Upper triangle (unpaired combos)
+
+**Why Boundary Testing Matters Here:**
+- Calculator functions use floating-point thresholds (2.5x, 4.0x, etc.)
+- Off-by-one errors in boundary comparisons lead to wrong strategy classifications
+- Exact boundary values (e.g., 2.5x vs 2.51x) change bucket assignments significantly
+- Tests document expected behavior for future enhancements
+
+**Running Tests:**
+```bash
+# All stats tests
+go test -v ./internal/stats/...
+
+# Specific boundary test suite
+go test -v ./internal/stats/ -run TestBucket
+
+# Single subtest
+go test -v ./internal/stats/ -run 'TestBucketByBBMultiple/exactly_2\.5x'
+```
+
 ## Practical Workflow
 
 1. Read `mise.toml` and touched package files/tests first.
